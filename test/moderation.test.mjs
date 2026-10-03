@@ -1,7 +1,7 @@
 // moderation.test.mjs — what a moderator does to topics and what members'
 // servers are told: remove a post, delete a topic, move one, pin one; and
 // which arriving activities are held as a moderator's ask.
-//   node --test packages/fedipod-bb/test/*.test.mjs
+//   npm test
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,7 +1,7 @@
 // gateway.test.mjs — the forum as fedipod.net runs it: a delivery placed at
 // the door lands in its topic at once with its carry left on the queue; the
 // run carries it, writes the heartbeat and says when it is next due.
-//   node --test packages/fedipod-bb/test/*.test.mjs
+//   npm test
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

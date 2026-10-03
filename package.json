@@ -3,6 +3,13 @@
   "version": "0.4.1",
   "description": "FediPod-BB: a forum website whose record lives on a Solid pod.",
   "license": "MIT",
+  "author": "Jeff Zucker",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeff-zucker/fedipod-bb.git"
+  },
+  "homepage": "https://github.com/jeff-zucker/fedipod-bb#readme",
+  "bugs": "https://github.com/jeff-zucker/fedipod-bb/issues",
   "type": "module",
   "main": "src/index.mjs",
   "exports": {
@@ -23,7 +30,6 @@
     "fep-draft.md"
   ],
   "scripts": {
-    "pretest": "node scripts/link-fedipod.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

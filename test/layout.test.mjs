@@ -1,6 +1,6 @@
 // layout.test.mjs — the forum's pod layout and writers, against a pod that
 // records what is written. No network.
-//   node --test packages/fedipod-bb/test/*.test.mjs
+//   npm test
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

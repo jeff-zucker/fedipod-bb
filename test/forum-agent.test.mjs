@@ -1,7 +1,7 @@
 // forum-agent.test.mjs — the host, against a pod kept in memory: two
 // categories, a member joining and posting, replies placed in topics, a
 // non-member refused, and two devices sharing the forum through the lease.
-//   node --test packages/fedipod-bb/test/*.test.mjs
+//   npm test
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -2,7 +2,7 @@
 // The rule this file exists for: OPEN or PRIVATE is the forum's own setting.
 // Naming a member does not close a category, and unnaming the last one does
 // not open it; only the forum saying so changes it.
-//   node --test packages/fedipod-bb/test/*.test.mjs
+//   npm test
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

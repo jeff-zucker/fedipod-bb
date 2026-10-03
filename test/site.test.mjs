@@ -1,6 +1,6 @@
 // site.test.mjs — the website's reader over a forum the host wrote, and its
 // Mastodon sign-in and posting against a server that answers as one does.
-//   node --test packages/fedipod-bb/test/*.test.mjs
+//   npm test
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
