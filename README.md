@@ -12,14 +12,11 @@ the forum from a moderator's machine, and the page that shows the forum.
 A moderator's console is part of that page: the queue of reports, held posts
 and asks, and the settings.
 The queue shows what needs a moderator: a report, a held post, a join
-request, and a request of a moderator's that did not take. The design and the phases are in
-`claude/plans/fedipod-bb.md` at the repository root.
-<!-- CLAUDE 2026-10-03 — the sentence above names a file in FediPod's claude/ folder, which is not in this repository; suggest deleting it. The test command below was `node --test packages/fedipod-bb/test/*.test.mjs`, a path inside FediPod. Delete these markers when done -->
+request, and a request of a moderator's that did not take.
 
 ```
 npm test
 ```
-<!-- /CLAUDE -->
 
 ## Hosting a forum
 
@@ -182,11 +179,9 @@ category's address; a reader with nothing is pointed at sign-up.
 
 ## Attaching to a Gateway
 
-<!-- CLAUDE 2026-10-03 — was `node packages/fedipod-bb/bin/fedipod-bb.mjs attach …`, a path inside FediPod; written like the other commands now. Delete these markers when done -->
 ```
 fedipod-bb attach --home DIR --front https://fedipod.net
 ```
-<!-- /CLAUDE -->
 
 Takes `@<handle>@fedipod.net` for the forum and one address per category,
 each a row of its own at the Gateway pointing at that category's tree on the
