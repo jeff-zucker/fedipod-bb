@@ -11,7 +11,7 @@
 //   #/  #/c/<slug>  #/t/<slug>/<tid>
 
 import { reader, placeOf, authorLabel, cacheKey, categoryBase, cleanHtml } from './read.mjs';
-import { MastoLogin, hostOfHandle, serverKind, actorOfHandle } from './masto.mjs';
+import { MastoLogin, hostOfHandle, serverKind, actorOfHandle, returnAddress } from './masto.mjs';
 import * as pod from './pod.mjs';
 import { mine as keptByReader } from './mine.mjs';
 import { readState } from './seen.mjs';
@@ -47,7 +47,7 @@ let freshRead = false;
 const readerFetch = (url, init = {}) => fetch(url, freshRead ? { ...init, cache: 'reload' } : init);
 const makeReader = (session = null) => reader({ session, fetch: readerFetch });
 let read = makeReader();
-const login = new MastoLogin({ storage: localStorage, redirectUri: location.origin + location.pathname + location.search });
+const login = new MastoLogin({ storage: localStorage, redirectUri: returnAddress(location.href) });
 // What this reader has already read. Theirs, in their own browser: a public
 // forum has nowhere to keep it and no business keeping it.
 const seen = base ? readState({ storage: localStorage, forum: base }) : null;

@@ -54,6 +54,15 @@ export async function serverKind(host, front, f = globalThis.fetch.bind(globalTh
   } catch { return { kind: 'unknown', host }; }
 }
 
+// Where Mastodon sends the reader back: this page, without the sign-in's own
+// code and state. Mastodon hands out the key only for the address it approved,
+// and the page comes back with those two added, so both legs name it this way.
+export function returnAddress(href) {
+  const u = new URL(href);
+  for (const k of ['code', 'state', 'iss']) u.searchParams.delete(k);
+  return u.origin + u.pathname + u.search;
+}
+
 export class MastoLogin {
   // `storage` is localStorage-shaped; `fetch` is the page's.
   constructor({ fetch: f = globalThis.fetch.bind(globalThis), storage, redirectUri }) {
