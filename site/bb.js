@@ -10,7 +10,7 @@
 //   https://bb.<site>/<handle>/     the same forum at its own address
 //   #/  #/c/<slug>  #/t/<slug>/<tid>
 
-import { reader, placeOf, authorLabel, cacheKey, categoryBase, cleanHtml } from './read.mjs';
+import { reader, placeOf, authorLabel, cacheKey, categoryBase, cleanHtml, sentNotListed } from './read.mjs';
 import { MastoLogin, hostOfHandle, serverKind, actorOfHandle, returnAddress } from './masto.mjs';
 import * as pod from './pod.mjs';
 import { mine as keptByReader } from './mine.mjs';
@@ -467,6 +467,15 @@ async function showSettings() {
 let index = null;
 const INDEX_STALE_MS = 60_000;
 function forgetIndex() { index = null; authors.clear(); }
+// A post just sent from here is listed once its server has delivered it to
+// the forum. Until then the index is read again every few seconds, for half a
+// minute, instead of being kept for a minute without it.
+const SENT_EVERY_MS = 5_000;
+const SENT_WAIT_MS = 30_000;
+let sent = null;               // { id, until }
+const waitingOnSent = (idx) => sentNotListed(sent, idx?.latest);
+const indexHolds = (idx, want) => !!idx && idx.limit >= want
+  && Date.now() - idx.at < (waitingOnSent(idx) ? SENT_EVERY_MS : INDEX_STALE_MS);
 
 // Who wrote it, and the digest a topic link carries. Both are asked once per
 // ROW, and the same people and the same posts come round again every time the
@@ -486,7 +495,7 @@ function digestOnce(id) {
 }
 
 async function readIndex(want) {
-  if (index && index.limit >= want && Date.now() - index.at < INDEX_STALE_MS) return index;
+  if (indexHolds(index, want)) return index;
   const latest = await read.latest(base, { limit: want });
   const site = new Set(await read.featured(base));
   const pinned = new Map();
@@ -543,14 +552,15 @@ async function showForum() {
   // Only say "Loading" when something is actually going to be waited for. The
   // reader changing category has everything already; blanking the page for
   // them was the whole of the delay they could see.
-  const willFetch = !(index && index.limit >= want && Date.now() - index.at < INDEX_STALE_MS);
-  if (willFetch) {
+  const willFetch = !indexHolds(index, want);
+  if (willFetch && !waitingOnSent(index)) {
     $('mods-acts').innerHTML = acts();
     $('main').innerHTML = head() + '<p class="dim">Loading…</p>';
     say('Loading the latest posts');
   }
   const idx = await readIndex(want);
   if (mineView !== view) return;
+  if (waitingOnSent(idx)) setTimeout(() => { if (mineView === view) showForum(); }, SENT_EVERY_MS);
   showMods(idx);
   const latest = idx.latest;
   const looking = finding.trim().toLowerCase();
@@ -1589,6 +1599,7 @@ $('reply-send').addEventListener('click', async () => {
     $('reply-text').value = '';
     $('topic-title').value = '';
     $('reply-dlg').close();
+    if (!editing && (made?.uri || made?.url)) sent = { id: made.uri || made.url, until: Date.now() + SENT_WAIT_MS };
     forgetIndex();
     freshRead = true;
     try { await route(); } finally { freshRead = false; }

@@ -4,6 +4,11 @@ Changes up to and including 0.4.1 are recorded in FediPod's
 [CHANGES.md](https://github.com/jeff-zucker/FediPod/blob/main/CHANGES.md),
 under the headings that name fedipod-bb.
 
+## 2026-10-10 (a reply shows in the list of topics within seconds — version 0.4.4)
+
+**A reply you post shows in the forum's list of topics as soon as the forum
+has it**, usually within seconds. It could take a minute.
+
 ## 2026-10-10 (signing in with a Mastodon account works — version 0.4.3)
 
 **Signing in to the forum with a Mastodon account signs you in.** After

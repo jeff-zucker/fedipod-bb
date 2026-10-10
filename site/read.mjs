@@ -10,6 +10,12 @@ const MAX_PAGES = 50;
 
 export const categoryBase = (actorId) => String(actorId).replace(/ap\/actor$/u, '');
 
+// A post this page just sent, not yet in what the forum lists: its server
+// delivers it to the forum seconds after the page sent it.
+export function sentNotListed(sent, latest, now = Date.now()) {
+  return !!sent?.id && now < sent.until && !(latest || []).some(p => p.id === sent.id);
+}
+
 // A post's text, one copy: a server that sends it once per language hands
 // over a list, read as its first.
 export function textOf(v) {
