@@ -175,6 +175,8 @@ export async function cachePost({ remote, urls }, note, { topic = null, replies 
   // count beside every post it shows.
   if (Number.isFinite(likes)) copy.likes = { type: 'Collection', totalItems: likes };
   if (Number.isFinite(dislikes)) copy.dislikes = { type: 'Collection', totalItems: dislikes };
+  // One copy of the text: a server that sends it once per language hands over a list.
+  if (Array.isArray(copy.content)) copy.content = copy.content.find(s => typeof s === 'string') || '';
   if (typeof copy.content === 'string') copy.content = sanitizeHtml(copy.content);
   if (!copy['@context']) copy['@context'] = 'https://www.w3.org/ns/activitystreams';
   const url = urls.cached(note.id);

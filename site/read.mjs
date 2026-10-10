@@ -10,6 +10,51 @@ const MAX_PAGES = 50;
 
 export const categoryBase = (actorId) => String(actorId).replace(/ap\/actor$/u, '');
 
+// A post's text, one copy: a server that sends it once per language hands
+// over a list, read as its first.
+export function textOf(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.find(s => typeof s === 'string') || '';
+  return '';
+}
+
+// A post's text as the page shows it: only the tags and attributes a post may
+// carry (the list the forum's host keeps when it stores one), built back up
+// from a parse so nothing else reaches the page. DOMParser's parse is inert:
+// it runs no script and loads no image. `parse` is for tests.
+const KEEP = new Set(['p', 'br', 'a', 'span', 'em', 'strong', 'b', 'i', 'u', 'del',
+  'code', 'pre', 'blockquote', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4']);
+const ATTRS = new Set(['href', 'class', 'lang', 'title']);
+const DROP = new Set(['script', 'style', 'textarea', 'noscript', 'template', 'title', 'head']);
+const escText = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const linkable = (href) => { try { return ['http:', 'https:', 'mailto:'].includes(new URL(href).protocol); } catch { return false; } };
+const inert = (html) => new DOMParser().parseFromString(html, 'text/html').body;
+
+function rebuild(node) {
+  let out = '';
+  for (const n of node.childNodes) {
+    if (n.nodeType === 3) { out += escText(n.nodeValue); continue; }
+    if (n.nodeType !== 1) continue;
+    const tag = n.nodeName.toLowerCase();
+    if (DROP.has(tag)) continue;
+    if (!KEEP.has(tag)) { out += rebuild(n); continue; }
+    let attrs = '';
+    for (const a of n.attributes) {
+      const name = a.name.toLowerCase();
+      if (!ATTRS.has(name) || (name === 'href' && (tag !== 'a' || !linkable(a.value)))) continue;
+      attrs += ` ${name}="${escText(a.value)}"`;
+    }
+    if (tag === 'a') attrs += ' rel="nofollow noopener noreferrer"';
+    out += tag === 'br' ? '<br>' : `<${tag}${attrs}>${rebuild(n)}</${tag}>`;
+  }
+  return out;
+}
+
+export function cleanHtml(html, parse = inert) {
+  const text = textOf(html);
+  return text ? rebuild(parse(text)) : '';
+}
+
 // Where a forum is read from: through a Gateway at `<origin>/u/<handle>/`, or
 // a pod home given outright.
 export const forumBase = ({ origin = null, handle = null, pod = null } = {}) => {
@@ -213,8 +258,8 @@ export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session =
           id: copy.id || url,
 
           author: idOf([].concat(copy.attributedTo || [])[0]) || null,
-          name: copy.name || null,
-          content: typeof copy.content === 'string' ? copy.content : '',
+          name: textOf(copy.name) || null,
+          content: textOf(copy.content),
           published: copy.published || null,
           topic: idOf(copy.context) || null,
           inReplyTo: idOf(copy.inReplyTo) || null,
@@ -278,7 +323,7 @@ export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session =
       return {
         id: copy.id || postId, type: copy.type || 'Note', gone: copy.type === 'Tombstone', page,
         author: idOf([].concat(copy.attributedTo || [])[0]) || null,
-        name: copy.name || null, content: typeof copy.content === 'string' ? copy.content : '',
+        name: textOf(copy.name) || null, content: textOf(copy.content),
         // What its author typed, when they said so: an edit reopens this
         // rather than guessing it back out of the HTML.
         source: copy.source?.mediaType === 'text/markdown' && typeof copy.source?.content === 'string' ? copy.source.content : null,

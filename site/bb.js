@@ -10,7 +10,7 @@
 //   https://bb.<site>/<handle>/     the same forum at its own address
 //   #/  #/c/<slug>  #/t/<slug>/<tid>
 
-import { reader, placeOf, authorLabel, cacheKey, categoryBase } from './read.mjs';
+import { reader, placeOf, authorLabel, cacheKey, categoryBase, cleanHtml } from './read.mjs';
 import { MastoLogin, hostOfHandle, serverKind, actorOfHandle } from './masto.mjs';
 import * as pod from './pod.mjs';
 import { mine as keptByReader } from './mine.mjs';
@@ -70,7 +70,7 @@ const handleOf = (cat) => {
 // A post names the category it is for, and every reader of this page is
 // already in it: the address is how it got here, not something to read.
 function body(p, cat) {
-  const html = p?.content || '';
+  const html = cleanHtml(p?.content);
   if (!cat) return html;
   const d = document.createElement('div');
   d.innerHTML = html;
@@ -297,7 +297,7 @@ async function showReplies() {
     const href = cat && tid ? `#/t/${esc(cat.slug)}/${esc(tid)}/${esc(await cacheKey(p.id))}` : '#/';
     items.push(`<li><a class="title" href="${href}">${esc(p.topicName || 'Topic')}</a>
       <div class="meta">${who ? esc(who.handle) : esc(authorLabel(p.author || ''))} · ${esc(when(p.published))}</div>
-      <article class="post"><div class="body">${p.content || ''}</div></article></li>`);
+      <article class="post"><div class="body">${cleanHtml(p.content)}</div></article></li>`);
   }
   $('main').innerHTML = `<ul class="list">${items.join('')}</ul>`;
 }
@@ -391,7 +391,7 @@ async function showWho(handleOrId) {
     const href = c && tid ? `#/t/${esc(c.slug)}/${esc(tid)}/${esc(await cacheKey(p.id))}` : '#/';
     items.push(`<li><a class="title" href="${href}">${esc(p.topicName || 'Topic')}</a>
       <div class="meta">${c ? esc(c.name) + ' · ' : ''}${esc(when(p.published))} · ▲ ${p.likes || 0} ▼ ${p.dislikes || 0}</div>
-      <article class="post"><div class="body">${p.content || ''}</div></article></li>`);
+      <article class="post"><div class="body">${cleanHtml(p.content)}</div></article></li>`);
   }
   $('main').innerHTML = head + `<ul class="list">${items.join('')}</ul>`;
 }

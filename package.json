@@ -1,6 +1,6 @@
 {
   "name": "fedipod-bb",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "FediPod-BB: a forum website whose record lives on a Solid pod.",
   "license": "MIT",
   "author": "Jeff Zucker",
@@ -33,7 +33,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "fedipod": "^1.44.0",
+    "fedipod": "^1.50.2",
     "fediverse-session": "^0.2.1"
   }
 }
