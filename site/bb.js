@@ -7,22 +7,26 @@
 //
 //   /bb/?forum=<handle>            a forum attached to this site
 //   /bb/?pod=https://…/fedipod-bb/  a forum read from its pod directly
-//   https://bb.<site>/<handle>/     the same forum at its own address
-//   #/  #/c/<slug>  #/t/<slug>/<tid>
+//   https://bb.<site>/<handle>/     the same forum at its own address, where
+//     <handle>/c/<slug> and <handle>/t/<slug>/<tid> are a category and a topic
+//   #/  #/c/<slug>  #/t/<slug>/<tid>   the same views anywhere else
+//
+// At its own host a forum's page may arrive drawn, with what it was drawn
+// from beside it (src/render.mjs); the page then reads none of that again.
 
-import { reader, placeOf, authorLabel, cacheKey, categoryBase, cleanHtml, sentNotListed } from './read.mjs';
+import { reader, placeOf, viewOfPath, authorLabel, cacheKey, categoryBase, cleanHtml, sentNotListed } from './read.mjs';
 import { MastoLogin, hostOfHandle, serverKind, actorOfHandle, returnAddress } from './masto.mjs';
 import * as pod from './pod.mjs';
 import { mine as keptByReader } from './mine.mjs';
 import { readState } from './seen.mjs';
 import { toHtml } from './markdown.mjs';
+import * as draw from './draw.mjs';
 
+const { esc, when } = draw;
 const $ = (id) => document.getElementById(id);
 // Said to a screen reader when the page changes under it and no focus moves:
 // what is loading, how much arrived, that a link was copied.
 const say = (msg) => { const el = $('say'); if (el) el.textContent = msg; };
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const when = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10); };
 const ago = (iso) => {
   const ms = Date.now() - Date.parse(iso);
   if (!Number.isFinite(ms)) return '';
@@ -38,6 +42,15 @@ const params = new URLSearchParams(location.search);
 const place = placeOf({ origin: location.origin, pathname: location.pathname, search: location.search });
 const { front, base } = place;
 const frontHost = new URL(front).host;
+const addr = draw.addresses(place.root);
+// Where a sign-in comes back to: the forum's own address at its own host,
+// whichever of its pages it started from, so a reader's server is asked to
+// approve one address and not one per topic. Where the reader was is kept
+// beside it (`bb:return`) and gone back to after.
+const signInAddress = place.root ? location.origin + place.root : location.origin + location.pathname;
+const whereNow = () => (place.root ? location.pathname + location.hash : location.hash);
+// What the page arrived drawn from, when it was drawn at the forum's host.
+const boot = (() => { try { return JSON.parse($('bb-data')?.textContent || 'null'); } catch { return null; } })();
 // The reader asks anonymously first; where a category is members-only it
 // asks again with the pod session, if there is one. Right after this reader
 // posts, the next read goes past the browser's own copy of each document (a
@@ -47,7 +60,8 @@ let freshRead = false;
 const readerFetch = (url, init = {}) => fetch(url, freshRead ? { ...init, cache: 'reload' } : init);
 const makeReader = (session = null) => reader({ session, fetch: readerFetch });
 let read = makeReader();
-const login = new MastoLogin({ storage: localStorage, redirectUri: returnAddress(location.href) });
+const login = new MastoLogin({ storage: localStorage,
+  redirectUri: returnAddress(place.root ? signInAddress + location.search : location.href) });
 // What this reader has already read. Theirs, in their own browser: a public
 // forum has nowhere to keep it and no business keeping it.
 const seen = base ? readState({ storage: localStorage, forum: base }) : null;
@@ -67,47 +81,6 @@ const handleOf = (cat) => {
   if (place.handle && cat.slug) return `@${cat.slug}@${frontHost}`;
   return cat.id;
 };
-// A post names the category it is for, and every reader of this page is
-// already in it: the address is how it got here, not something to read.
-function body(p, cat) {
-  const html = cleanHtml(p?.content);
-  if (!cat) return html;
-  const d = document.createElement('div');
-  d.innerHTML = html;
-  for (const a of [...d.querySelectorAll('a')]) {
-    const names = a.getAttribute('href') === cat.id
-      || a.textContent.trim().replace(/^@/u, '') === String(cat.slug || '')
-      || a.textContent.trim() === handleOf(cat);
-    if (!names) continue;
-    const p0 = a.closest('p') || a.parentElement;
-    a.remove();
-    if (p0 && !p0.textContent.trim() && !p0.querySelector('img,a')) p0.remove();
-  }
-  return d.innerHTML;
-}
-
-// The author as they are known: their name when the forum kept a card for
-// them, and always the handle, which is the thing that is theirs everywhere.
-function byline(p, author) {
-  if (!author) return esc(p.author ? authorLabel(p.author) : '');
-  const handle = esc(author.handle);
-  const name = author.name && author.name !== author.handle ? esc(author.name) : null;
-  const inner = name ? `${name} <span class="dim">${handle}</span>` : handle;
-  // Their posts in this forum, not their page elsewhere: that is what a
-  // reader here is asking for when they click a name.
-  return `<a href="#/who/${encodeURIComponent(author.id)}">${inner}</a>`;
-}
-
-// Where this post can be READ away from here. A pod answers its post's own
-// address with JSON, so that address is no use to a person and is not shown;
-// a server that publishes a page for it says so, and the link names its host.
-function elsewhere(p) {
-  if (!p?.page) return '';
-  let host = '';
-  try { host = new URL(p.page).host; } catch { return ''; }
-  return ` <a href="${esc(p.page)}" class="dim" rel="noopener">on ${esc(host)}</a>`;
-}
-
 // Whose post this is, as this browser can tell: a pod account is its actor,
 // a Mastodon account is the profile its server gave us.
 const mine = (p) => {
@@ -115,77 +88,20 @@ const mine = (p) => {
   return !!me && !!p?.author && (p.author === me || p.author === podAcct?.webId);
 };
 
-// A thread in the shape it was written: each reply under the post it answers,
-// and anything whose parent is not here at the top level. Depth is capped so
-// a long argument does not walk off the side of the page.
-const MAX_DEPTH = 6;
-async function threaded(posts, authors, cat) {
-  const byId = new Map(posts.map(p => [p.id, p]));
-  const kids = new Map();
-  const roots = [];
-  for (const p of posts) {
-    const parent = p.inReplyTo && byId.has(p.inReplyTo) && p.inReplyTo !== p.id ? p.inReplyTo : null;
-    if (!parent) { roots.push(p); continue; }
-    if (!kids.has(parent)) kids.set(parent, []);
-    kids.get(parent).push(p);
-  }
-  const out = [];
-  const walk = async (p, depth) => {
-    const html = card(p, { author: p.author ? authors.get(p.author) : null, cat, anchor: await cacheKey(p.id) });
-    out.push(depth ? `<div class="nest" style="--depth:${Math.min(depth, MAX_DEPTH)}">${html}</div>` : html);
-    for (const k of kids.get(p.id) || []) await walk(k, depth + 1);
-  };
-  for (const r of roots) await walk(r, 0);
-  return out;
+// Who is reading, as the drawing (draw.mjs) needs to know it.
+function viewer() {
+  const isNew = (topic, at) => !!seen?.isNew(topic, at);
+  if (!account()) return { ...draw.NOBODY, isNew };
+  return { account: true, pod: !!podAcct, moderates: iModerate(), isNew, mine,
+    votedOn: (id) => own().votedOn(id), isSaved: (id) => own().isSaved(id), isJoined: (id) => own().isJoined(id) };
 }
+const drawing = () => ({ viewer: viewer(), addr, handleOf });
+const body = (p, cat) => draw.body(p, cat, drawing());
+const card = (p, opts = {}) => draw.card(p, opts, drawing());
 
-function topicActs(topicId) {
-  if (!iModerate()) return '';
-  return `<div class="acts mod" role="group" aria-label="Moderator actions for this topic" data-topic="${esc(topicId)}">
-    <button data-act="rename">Rename topic</button>
-    <button data-act="unlock">Reopen topic</button>
-    <button data-act="pin">Pin topic</button><button data-act="unpin">Unpin topic</button>
-    <button data-act="sitepin">Pin site-wide</button><button data-act="siteunpin">Unpin site-wide</button>
-    <button class="grave" data-act="lock">Close topic</button><button class="grave" data-act="droptopic">Delete topic</button>
-  </div>`;
-}
-
-// Voting, both ways, as a forum has always had it: up, down, and the one you
-// cast again to take it back. A reader with no account sees the counts.
-function votes(p) {
-  const up = p.likes || 0;
-  const down = p.dislikes || 0;
-  // Signed out, the buttons are still buttons: pressing one asks who you are
-  // and then casts the vote. Showing the counts as dead text hid the fact that
-  // voting was possible at all.
-  const mineWay = account() ? own().votedOn(p.id) : 'none';
-  const one = (way, mark, n, label) => `<button data-act="vote-${mineWay === way ? 'none' : way}"
-    data-was="${mineWay}"${mineWay === way ? ' aria-pressed="true" class="voted"' : ''}
-    aria-label="${mineWay === way ? `Take back your vote ${label}` : `Vote ${label} this post`}">${mark} ${n}</button>`;
-  return one('up', '▲', up, 'for') + one('down', '▼', down, 'against');
-}
-
-function card(p, { author = null, cat = null, extra = '', waiting = false, anchor = null } = {}) {
-  const at = p.published ? when(p.published) : '';
-  // What a screen reader hears before the words, and what each of this post's
-  // own buttons is called — a thread of them is not twenty identical "Reply"s.
-  const whose = esc(author ? (author.name || author.handle) : (p.author ? authorLabel(p.author) : 'someone'));
-  const named = `${waiting ? 'Waiting: p' : 'P'}ost by ${whose}${at ? `, ${esc(at)}` : ''}`;
-  return `<article class="post${p.gone ? ' gone' : ''}${extra}" aria-label="${named}"${anchor ? ` id="p-${esc(anchor)}"` : ''}>
-    <div class="who"><b>${waiting ? '<span class="dim">waiting for the forum · </span>' : ''}${byline(p, author)}</b>
-      <span class="when">${esc(at)}${elsewhere(p)}</span></div>
-    <div class="body">${p.gone ? 'This post was removed.' : (body(p, cat) || '<span class="dim">(not readable here)</span>')}</div>
-    ${p.gone || waiting || !p.id ? '' : `<div class="acts" data-post="${esc(p.id)}">
-      <button data-act="reply" aria-label="Reply to ${whose}">Reply</button>
-      ${votes(p)}
-      <button data-act="share" aria-label="Copy a link to the post by ${whose}">Share</button>
-      ${account() ? `<button data-act="${own().isSaved(p.id) ? 'unsave' : 'save'}" aria-label="${own().isSaved(p.id) ? 'Remove this post from your bookmarks' : 'Bookmark this post'}">${own().isSaved(p.id) ? 'Bookmarked' : 'Bookmark'}</button>` : ''}
-      ${mine(p) || !account() ? '' : `<button data-act="report" aria-label="Report the post by ${whose}">Report</button>`}
-      ${mine(p) ? '<button data-act="edit" aria-label="Edit your own post">Edit</button><button data-act="delete" aria-label="Delete your own post">Delete</button>' : ''}
-      ${!mine(p) && iModerate() ? `<button data-act="remove" aria-label="Remove the post by ${whose}">Remove</button>` : ''}
-    </div>`}
-  </article>`;
-}
+// The page as it arrived drawn is left as it is, unless this reader would be
+// shown something a stranger is not.
+const asDrawn = (drawn) => !!drawn && !account() && !iModerate();
 
 const waitingKey = (topicId) => 'bb:waiting:' + topicId;
 const waiting = (topicId) => { try { return (JSON.parse(localStorage.getItem(waitingKey(topicId)) || '[]') || []).filter(w => w?.id); } catch { return []; } };
@@ -202,7 +118,7 @@ async function load() {
     $('main').innerHTML = `<p class="err">Name a forum: <code>${esc(location.origin)}/&lt;forum&gt;/</code></p>`;
     return;
   }
-  forum = await read.forum(base);
+  forum = boot?.forum || await read.forum(base);
   if (!forum) {
     // A forum that does not exist and one whose pod is down read the same
     // to the reader above; asking once more tells them apart, so a reader is
@@ -214,22 +130,32 @@ async function load() {
       : '<p class="err">The pod that holds this forum is not answering right now, so the forum cannot be shown. Try again later.</p>';
     return;
   }
-  document.title = forum.name || 'FediPod-BB';
   $('forum-link').textContent = forum.name || 'Forum';
+  $('forum-link').setAttribute('href', addr.front());
   // Who moderates, under the line: the forum's own list, each name linking to
   // the page that account keeps.
-  const mods = (forum.admins || []).map(a => `<a href="#/who/${encodeURIComponent(a.id)}">${esc(a.handle)}</a>`).join(', ');
-  $('mods-who').innerHTML = mods ? `<span class="lead">moderators:</span> ${mods}` : '';
+  if (!boot) $('mods-who').innerHTML = draw.modsWho((forum.admins || []).map(a => ({ id: a.id, handle: a.handle })));
+  takeDrawn();
   route();
 }
 
 function crumbs(parts) {
-  // One stop is no trail: the front page needs no line saying it is the
-  // front page.
-  if (parts.length < 2) { $('crumbs').textContent = ''; $('crumbs').hidden = true; return; }
-  $('crumbs').hidden = false;
-  $('crumbs').innerHTML = parts.map(([label, href], i) => (href && i < parts.length - 1 ? `<a href="${esc(href)}">${esc(label)}</a>` : esc(label))).join(' › ');
+  const trail = draw.crumbs(parts);
+  $('crumbs').hidden = trail.hidden;
+  $('crumbs').innerHTML = trail.html;
 }
+
+// The drawn page is the first view's only. After it, every view is the
+// page's own to read and draw.
+let first = true;
+const drawnFor = (kind, slug = null, tid = null) => {
+  if (!first || !boot?.view || boot.view.kind !== kind) return null;
+  if ((slug && boot.view.slug !== slug) || (tid && boot.view.tid !== tid)) return null;
+  // A reader signed in to a pod may read what a stranger may not, so a forum
+  // with a members-only category is read again as them.
+  if (podAcct && cats().some(c => c.private)) return null;
+  return boot;
+};
 
 // Who the page is holding, in the top row: the handle a reader posts under,
 // and the way in when there is nobody. Signing in from here is what makes the
@@ -240,15 +166,28 @@ function paintWho() {
   $('who-act').textContent = acct ? 'Sign out' : 'Sign in';
 }
 
+// Which view an address names, leaving out the post a link points at.
+const viewKey = () => location.pathname + (location.hash.startsWith('#/') ? location.hash : '');
+let routed = null;
+
 async function route() {
+  routed = viewKey();
   paintWho();
   // Searching and starting a topic belong to the forum's own view; the rest of
   // the page keeps the moderators line and nothing else.
-  $('mods-acts').innerHTML = '';
+  const hash = location.hash.startsWith('#/') ? location.hash.slice(2) : '';
+  const [kind, a, b, c] = hash.split('/');
+  // At the forum's own host the front page, a category and a topic have
+  // addresses of their own, and an old link to one of them is taken there.
+  if (place.root && location.hash.startsWith('#/') && !HASH_VIEWS.has(kind)) {
+    const to = kind === 'c' && a ? addr.cat(a) : kind === 't' && a && b ? addr.topic(a, b, c || null) : addr.front();
+    if (to.split('#')[0] !== location.pathname) { location.replace(to); return undefined; }
+    history.replaceState(null, '', to);
+    return route();
+  }
+  if (!first || !boot) $('mods-acts').innerHTML = '';
   const mine = ++view;
   void mine;
-  const hash = location.hash.replace(/^#\/?/u, '');
-  const [kind, a, b, c] = hash.split('/');
   $('reply-row').hidden = true;
   $('reply-dlg').close();
   if (kind === 'replies') return showReplies();
@@ -256,8 +195,10 @@ async function route() {
   if (kind === 'queue') return showQueue();
   if (kind === 'settings') return showSettings();
   if (kind === 'who' && a) return showWho(decodeURIComponent(a));
-  if (kind === 'c' && a) { if (feedFilter !== a) shown = 30; feedFilter = a; return showForum(); }
-  if (kind === 't' && a && b) return showTopic(a, b, c || null);
+  const at = place.root ? viewOfPath(location.pathname, place.root)
+    : kind === 'c' && a ? { kind: 'cat', slug: a } : kind === 't' && a && b ? { kind: 'topic', slug: a, tid: b, post: c || null } : { kind: 'front' };
+  if (at.kind === 'cat') { if (feedFilter !== at.slug) shown = 30; feedFilter = at.slug; return showForum(); }
+  if (at.kind === 'topic') return showTopic(at.slug, at.tid, at.post || (/^#p-([0-9a-f]+)$/u.exec(location.hash)?.[1] ?? null));
   // `#/` IS the whole forum, so arriving at it clears the category. Leaving the
   // filter where it was meant Home redrew whatever category you had been in,
   // and All — whose link is `#/` — redrew the same one, which from the reader's
@@ -275,13 +216,15 @@ let view = 0;                  // which view the page is on; an older one must n
 let order = 'date';            // which column the index is ordered by
 let down = true;               // and which way
 let finding = '';              // what the reader is looking for, if anything
+// The views that are this reader's own, or a moderator's: after `#` everywhere.
+const HASH_VIEWS = new Set(['replies', 'bookmarks', 'saved', 'queue', 'settings', 'who']);
 // What this reader keeps for themselves, under the account they signed in as.
 const own = () => keptByReader({ storage: localStorage, who: account()?.handle || null });
 
 // Answers to this reader's own posts, newest first. The forum publishes what
 // each post answers, so nobody has to be told whom to notify.
 async function showReplies() {
-  crumbs([['Home', '#/'], ['Replies to you', null]]);
+  crumbs([['Home', addr.front()], ['Replies to you', null]]);
   const me = podAcct?.actor || login.account()?.url;
   if (!me) { $('main').innerHTML = '<p class="empty">Sign in to see answers to your posts.</p>'; return; }
   $('main').innerHTML = '<p class="dim">Looking…</p>';
@@ -294,7 +237,7 @@ async function showReplies() {
     const cat = cats().find(c => c.id === p.category) || null;
     const who = cat && p.author ? await read.author(cat.base, p.author) : null;
     const tid = p.topic ? p.topic.split('/').pop() : null;
-    const href = cat && tid ? `#/t/${esc(cat.slug)}/${esc(tid)}/${esc(await cacheKey(p.id))}` : '#/';
+    const href = esc(cat && tid ? addr.topic(cat.slug, tid, await cacheKey(p.id)) : addr.front());
     items.push(`<li><a class="title" href="${href}">${esc(p.topicName || 'Topic')}</a>
       <div class="meta">${who ? esc(who.handle) : esc(authorLabel(p.author || ''))} · ${esc(when(p.published))}</div>
       <article class="post"><div class="body">${cleanHtml(p.content)}</div></article></li>`);
@@ -304,13 +247,13 @@ async function showReplies() {
 
 // Posts this reader kept. The list is theirs and lives in this browser.
 function showSaved() {
-  crumbs([['Home', '#/'], ['Bookmarked', null]]);
+  crumbs([['Home', addr.front()], ['Bookmarked', null]]);
   const rows = own().saved();
   if (!rows.length) { $('main').innerHTML = '<p class="empty">Nothing bookmarked yet. Use Bookmark on a post.</p>'; return; }
   $('main').innerHTML = `<ul class="list">${rows.map(r => {
     const cat = cats().find(c => c.slug === r.cat) || null;
     const tid = r.topic ? r.topic.split('/').pop() : null;
-    const href = cat && tid ? `#/t/${esc(cat.slug)}/${esc(tid)}` : '#/';
+    const href = esc(cat && tid ? addr.topic(cat.slug, tid) : addr.front());
     return `<li><a class="title" href="${href}">${esc(r.text || r.id)}</a>
       <div class="meta">bookmarked ${esc(when(r.at))}${cat ? ' · ' + esc(cat.name) : ''}</div></li>`;
   }).join('')}</ul>`;
@@ -320,7 +263,7 @@ function showSaved() {
 // and asks not yet acted on. Read from the forum's pod with the moderator's
 // own login — it is not public and never passes through the Gateway.
 async function showQueue() {
-  crumbs([['Home', '#/'], ['Queue', null]]);
+  crumbs([['Home', addr.front()], ['Queue', null]]);
   if (!podAcct) { $('main').innerHTML = '<p class="empty">The queue is read with your pod account.</p>'; return; }
   $('main').innerHTML = '<p class="dim">Reading the queue…</p>';
   try {
@@ -351,7 +294,7 @@ async function showQueue() {
 }
 
 async function showWho(handleOrId) {
-  crumbs([['Home', '#/'], ['Someone', null]]);
+  crumbs([['Home', addr.front()], ['Someone', null]]);
   $('main').innerHTML = '<p class="dim">Looking…</p>';
   const latest = await read.latest(base, { limit: 200 });
   const theirs = latest.filter(p => p.author === handleOrId);
@@ -364,7 +307,7 @@ async function showWho(handleOrId) {
   // is, so where it names no page the account itself is asked.
   const said = kept?.url ? null : await read.actorCard(handleOrId).catch(() => null);
   const card = kept && said ? { ...kept, url: said.url, name: kept.name || said.name } : (kept || said);
-  crumbs([['Home', '#/'], [card?.handle || authorLabel(handleOrId), null]]);
+  crumbs([['Home', addr.front()], [card?.handle || authorLabel(handleOrId), null]]);
   const named = esc(card?.handle || authorLabel(handleOrId));
   // A word with them and nobody else. Only from a pod account: the message is
   // written on the sender's own pod before it is handed over.
@@ -388,7 +331,7 @@ async function showWho(handleOrId) {
   for (const p of theirs) {
     const c = cats().find(x => x.id === p.category) || null;
     const tid = p.topic ? p.topic.split('/').pop() : null;
-    const href = c && tid ? `#/t/${esc(c.slug)}/${esc(tid)}/${esc(await cacheKey(p.id))}` : '#/';
+    const href = esc(c && tid ? addr.topic(c.slug, tid, await cacheKey(p.id)) : addr.front());
     items.push(`<li><a class="title" href="${href}">${esc(p.topicName || 'Topic')}</a>
       <div class="meta">${c ? esc(c.name) + ' · ' : ''}${esc(when(p.published))} · ▲ ${p.likes || 0} ▼ ${p.dislikes || 0}</div>
       <article class="post"><div class="body">${cleanHtml(p.content)}</div></article></li>`);
@@ -409,7 +352,7 @@ async function knowModerators() {
 }
 
 async function showSettings() {
-  crumbs([['Home', '#/'], ['Settings', null]]);
+  crumbs([['Home', addr.front()], ['Settings', null]]);
   await knowModerators();
   if (!iModerate()) { $('main').innerHTML = '<p class="empty">Only this forum\'s moderators may change it.</p>'; return; }
   if (!podAcct) { $('main').innerHTML = '<p class="empty">Changing the forum is done with your pod account.</p>'; return; }
@@ -496,224 +439,106 @@ function digestOnce(id) {
 
 async function readIndex(want) {
   if (indexHolds(index, want)) return index;
-  const latest = await read.latest(base, { limit: want });
-  const site = new Set(await read.featured(base));
-  const pinned = new Map();
-  const mods = new Map();
-  for (const c of cats()) {
-    pinned.set(c.id, new Set(await read.featured(c.base)));
-    mods.set(c.id, await read.moderators(c.base));
-  }
-  index = { at: Date.now(), limit: want, latest, site, pinned, mods };
+  index = await draw.readIndex(read, base, cats(), want);
   return index;
+}
+
+// The drawn page's index, authors and digests, as if this page had read them.
+function takeDrawn() {
+  if (!boot || (podAcct && cats().some(c => c.private))) return;
+  if (boot.index) index = { ...boot.index, at: Date.now() };
+  for (const [key, card] of Object.entries(boot.facts?.authors || {})) authors.set(key, Promise.resolve(card));
+  for (const [id, digest] of Object.entries(boot.facts?.digests || {})) digests.set(id, Promise.resolve(digest));
 }
 
 async function showForum() {
   const mineView = view;
   const here = cats().find(c => c.slug === feedFilter) || null;
-  crumbs(here ? [['Home', '#/'], [here.name, `#/c/${here.slug}`]] : [['Home', '#/']]);
-  // Who moderates what is on screen. Showing the whole forum, that is
-  // whoever moderates its categories — otherwise a moderator looking at
-  // everything would look like a stranger.
-  // Moderators come out of the index below, which holds them for every
-  // category — so this no longer decides what to fetch, only what to show.
-  const showMods = (idx) => {
-    if (here) { moderators = idx.mods.get(here.id) || []; } else {
-      const all = new Set();
-      for (const list of idx.mods.values()) for (const m of list) all.add(m);
-      moderators = [...all];
-    }
-    // The line under the rule says who they are. It is painted from the
-    // forum's own list when the page loads; this keeps it with the categories'
-    // lists, which is where a moderator added while you read appears first.
-    paintMods(moderators);
-  };
-  const chip = (slug, label) => `<a class="chip${feedFilter === slug ? ' on' : ''}"${feedFilter === slug ? ' aria-current="page"' : ''} href="${slug === 'all' ? '#/' : `#/c/${esc(slug)}`}">${esc(label)}</a>`;
-  // Starting a topic from the front page: in the category being shown, or the
-  // first one when the whole forum is.
-  const into = cats().find(c => c.slug === feedFilter) || cats()[0] || null;
-  // Built where it is drawn, not once above: whether this reader moderates is
-  // read with the index below, and a row composed before that always said no.
-  const head = () => `<p class="hint chips">Categories: ${chip('all', 'All')}${cats().map(c => chip(c.slug || '', c.name)).join('')}
-    ${account() ? '<a class="chip" href="#/replies">Replies to you</a><a class="chip" href="#/bookmarks">Bookmarked</a>' : ''}
-    ${iModerate() ? '<a class="chip" href="#/queue">Queue</a><a class="chip" href="#/settings">Settings</a>' : ''}
-    <span class="rowend">
-      ${here && account() && podAcct ? `<button class="new" data-act="${own().isJoined(here.id) ? 'leave' : 'join'}" data-cat="${esc(here.id)}">${own().isJoined(here.id) ? 'Leave' : 'Join'}</button>` : ''}
-    </span></p>`;
-  // Search and New topic ride at the right end of the moderators row, which is
-  // the one line the page keeps above whatever is being read.
-  const acts = () => `<label class="vh" for="find">Search this forum</label>
-    <input type="text" id="find" placeholder="Search" value="${esc(finding)}" autocomplete="off"${finding ? '' : ' hidden'}>
-    <button data-act="search"${finding ? ' hidden' : ''}>Search</button>
-    ${into ? `<button data-act="newtopic" data-slug="${esc(into.slug || '')}">New topic</button>` : ''}`;
-  if (mineView !== view) return;
+  // As it arrived, when it arrived drawn for a stranger and this reader is one.
+  const keep = first && asDrawn(drawnFor(here ? 'cat' : 'front', here?.slug || null)) && !finding;
+  first = false;
+  const trail = here ? [['Home', addr.front()], [here.name, addr.cat(here.slug)]] : [['Home', addr.front()]];
+  if (!keep) crumbs(trail);
   // Enough posts to fill a page of TOPICS: several posts can belong to one.
   const want = Math.min(300, shown * 5);
   // Only say "Loading" when something is actually going to be waited for. The
   // reader changing category has everything already; blanking the page for
   // them was the whole of the delay they could see.
-  const willFetch = !indexHolds(index, want);
-  if (willFetch && !waitingOnSent(index)) {
-    $('mods-acts').innerHTML = acts();
-    $('main').innerHTML = head() + '<p class="dim">Loading…</p>';
+  if (!indexHolds(index, want) && !waitingOnSent(index)) {
+    $('mods-acts').innerHTML = draw.frontActs({ cats: cats(), filter: feedFilter, finding });
+    $('main').innerHTML = draw.frontChips({ cats: cats(), filter: feedFilter, here }, drawing()) + '<p class="dim">Loading…</p>';
     say('Loading the latest posts');
   }
   const idx = await readIndex(want);
   if (mineView !== view) return;
   if (waitingOnSent(idx)) setTimeout(() => { if (mineView === view) showForum(); }, SENT_EVERY_MS);
-  showMods(idx);
-  const latest = idx.latest;
-  const looking = finding.trim().toLowerCase();
-  const mine = latest.filter(p => (feedFilter === 'all'
-    || (cats().find(c => c.id === p.category)?.slug === feedFilter))
-    // Searching what the page has: a topic's name, an author's handle, and
-    // the words of the post itself.
-    && (!looking || [p.topicName, p.author, p.content].some(v => String(v || '').toLowerCase().includes(looking))));
-  // Pinned topics first. A pin belongs to a category; the forum has a
-  // featured collection of its own for a pin that holds everywhere.
-  const pins = { cat: new Set(), site: idx.site };
-  for (const c of cats()) {
-    if (feedFilter !== 'all' && c.slug !== feedFilter) continue;
-    for (const id of idx.pinned.get(c.id) || []) pins.cat.add(id);
-  }
-  // One row per topic: the newest post in it stands for it, which is what a
-  // reader wants to open — the thing they have not read.
-  const byTopic = new Map();
-  for (const p of mine) {
-    if (!p.topic) continue;
-    const held = byTopic.get(p.topic);
-    if (!held || String(p.published || '') > String(held.published || '')) byTopic.set(p.topic, p);
-  }
-  const rank = (p) => (pins.site.has(p.topic) ? 2 : pins.cat.has(p.topic) ? 1 : 0);
-  // Pinned first whatever the order; then the column the reader chose.
-  // Posts, not replies: a topic with nobody answering yet still HAS the post
-  // that started it, and a column reading 0 beside a topic you can open and
-  // read says the wrong thing. The count the forum keeps is of replies, so the
-  // opening post is the one added here.
-  const by = (p) => (order === 'replies' ? (p.topicReplies || 0) + 1 : String(p.published || ''));
-  const topics = [...byTopic.values()].sort((a, b) => rank(b) - rank(a)
-    || (down ? (by(a) > by(b) ? -1 : by(a) < by(b) ? 1 : 0) : (by(a) > by(b) ? 1 : by(a) < by(b) ? -1 : 0)));
-  const page = topics.slice(0, shown);
-  if (!topics.length) {
-    // A members-only category that will not answer this reader looks exactly
-    // like an empty one. Ask it a question only a member can have answered.
-    if (here && !(await read.topics(here.base)).total && !(await read.canRead(here.base))) {
-      if (mineView !== view) return;
-      $('mods-acts').innerHTML = acts();
-    $('main').innerHTML = head() + (podAcct
-        ? `<p class="empty row">This category is for its members.
-           <button class="new" data-act="ask-join" data-cat="${esc(here.id)}">Request membership</button></p>`
-        : `<p class="empty row">This category is for its members, and membership needs a FediPod account.
-           <a class="big" href="${esc(front)}/new-account">Get a FediPod account</a></p>`);
-      say('This category is for its members');
-      return;
-    }
-    // The one thing to do on an empty page is the one thing offered.
-    if (mineView !== view) return;
-    $('mods-acts').innerHTML = acts();
-    $('main').innerHTML = head() + '<p class="empty">Nothing posted here yet. Use the button at the upper right to create a topic.</p>';
-    say('Nothing posted here yet');
-    return;
-  }
-  const rows = [];
-  let fresh = 0;
+  // Who moderates what is on screen. Showing the whole forum, that is
+  // whoever moderates its categories — otherwise a moderator looking at
+  // everything would look like a stranger. The line under the rule says who
+  // they are: painted from the forum's own list when the page loads, and kept
+  // with the categories' lists, which is where a moderator added while you
+  // read appears first.
+  moderators = draw.moderatorsOf(idx, here);
+  if (!keep) paintMods(moderators);
+  const rows = draw.frontRows({ cats: cats(), idx, filter: feedFilter, finding, order, down, shown });
+  // A members-only category that will not answer this reader looks exactly
+  // like an empty one. Ask it a question only a member can have answered.
+  const membersOnly = !rows.topics.length && !!here
+    && !(await read.topics(here.base)).total && !(await read.canRead(here.base));
   // Every row's author and digest at once rather than one row at a time: they
   // do not depend on each other, and waiting for each in turn is the whole of
   // the delay between choosing a category and seeing it.
-  const looked = await Promise.all(page.map(async (p) => {
-    const cat = cats().find(c => c.id === p.category) || null;
-    return {
-      cat,
-      who: cat && p.author ? await authorOnce(cat.base, p.author) : null,
-      digest: await digestOnce(p.id),
-    };
-  }));
+  const facts = await draw.rowFacts(rows.page, cats(), authorOnce, digestOnce);
   if (mineView !== view) return;
-  for (let i = 0; i < page.length; i++) {
-    const p = page[i];
-    const { cat, who, digest } = looked[i];
-    const tid = p.topic ? p.topic.split('/').pop() : null;
-    const href = cat && tid ? `#/t/${esc(cat.slug)}/${esc(tid)}/${esc(digest)}` : null;
-    const name = esc(p.topicName || 'Topic');
-    // New to THIS reader: posted since they last had the topic open.
-    const isNew = !!seen?.isNew(p.topic, p.published);
-    if (isNew) fresh += 1;
-    const byline = who ? who.handle : (p.author ? authorLabel(p.author) : '');
-    rows.push(`<tr>
-      <td>${pins.site.has(p.topic) ? '<span class="pin" title="Pinned across the forum" role="img" aria-label="pinned across the forum">\u2B50</span> ' : pins.cat.has(p.topic) ? '<span class="pin" title="Pinned in this category" role="img" aria-label="pinned in this category">\uD83D\uDCCC</span> ' : ''}${href ? `<a href="${href}">${name}</a>` : name}${isNew
-        ? ' <span class="badge">New<span class="vh"> since you last opened this topic</span></span>' : ''}</td>
-      <td>${cat ? esc(cat.name) : ''}</td>
-      <td>${byline ? (p.author
-        ? `<a class="who" href="#/who/${encodeURIComponent(p.author)}" title="${esc(byline)}">${esc(byline)}</a>`
-        : `<span class="who" title="${esc(byline)}">${esc(byline)}</span>`) : ''}</td>
-      <td>${esc(when(p.published))}</td>
-      <td>${Number.isFinite(p.topicReplies) ? p.topicReplies + 1 : ''}</td>
-    </tr>`);
+  const out = draw.drawFront({ forum, cats: cats(), filter: feedFilter, finding, order, down, rows, facts, membersOnly, front }, drawing());
+  document.title = out.title;
+  say(out.say);
+  if (!keep || out.fresh) {
+    crumbs(trail);
+    $('mods-acts').innerHTML = out.acts;
+    $('main').innerHTML = out.main;
   }
-  // A table, so a reader can run their eye down any one of the four things
-  // an entry says.
-  const more = Math.max(0, topics.length - page.length) + (latest.more || 0);
-  if (mineView !== view) return;
-  $('mods-acts').innerHTML = acts();
-    $('main').innerHTML = head() + `<div class="scroll" role="region" aria-label="Topics, most recently posted in first" tabindex="0"><table class="index">
-    <thead><tr><th scope="col">Topic</th><th scope="col">Category</th><th scope="col">Latest by</th>
-      <th scope="col" aria-sort="${order === 'date' ? (down ? 'descending' : 'ascending') : 'none'}">
-        <button class="sort" data-act="order" data-order="date">Date ${order === 'date' ? (down ? '▼' : '▲') : '<span class="dim">▽</span>'}</button></th>
-      <th scope="col" aria-sort="${order === 'replies' ? (down ? 'descending' : 'ascending') : 'none'}">
-        <button class="sort" data-act="order" data-order="replies">Posts ${order === 'replies' ? (down ? '▼' : '▲') : '<span class="dim">▽</span>'}</button></th></tr></thead>
-    <tbody>${rows.join('')}</tbody></table>
-    ${more ? `<p class="row"><button data-act="more">Show ${Math.min(more, 30)} more of ${more}</button></p>` : ''}</div>`;
-  say(`${rows.length} topic${rows.length === 1 ? '' : 's'}${fresh ? `, ${fresh} with something new` : ''}`);
   // The box takes the keyboard only when there is something in it to scroll:
   // a tab stop that does nothing is one more press between a reader and the page.
-  const box = $('main').querySelector('.scroll');
-  if (box) { if (box.scrollHeight > box.clientHeight) box.tabIndex = 0; else box.removeAttribute('tabindex'); }
+  const scroller = $('main').querySelector('.scroll');
+  if (scroller) { if (scroller.scrollHeight > scroller.clientHeight) scroller.tabIndex = 0; else scroller.removeAttribute('tabindex'); }
 }
 
-
 async function showTopic(slug, tid, atPost = null) {
+  const drawn = drawnFor('topic', slug, tid);
+  const keep = first && asDrawn(drawn);
+  first = false;
   const cat = catBySlug(slug);
   if (!cat) { $('main').innerHTML = '<p class="err">No such category.</p>'; return; }
   const topicId = cat.base + 'ap/topic/' + tid;
-  moderators = await read.moderators(cat.base);
-  crumbs([['Home', '#/'], [cat.name, `#/c/${slug}`], ['topic', null]]);
-  $('main').innerHTML = '<p class="dim">Loading…</p>';
-  say('Loading the topic');
-  const t = await read.topic(topicId);
-  if (!t) { $('main').innerHTML = '<p class="err">No such topic.</p>'; return; }
-  crumbs([['Home', '#/'], [cat.name, `#/c/${slug}`], [t.name, null]]);
-  const posts = [];
-  for (const id of t.posts) posts.push({ id, ...(await read.post(cat.base, id)) });
-  const authors = new Map();
-  for (const p of posts) {
-    if (!p.author || authors.has(p.author)) continue;
-    authors.set(p.author, await read.author(cat.base, p.author));
+  let got = drawn?.topic?.topicId === topicId ? drawn.topic : null;
+  if (!got) {
+    crumbs([['Home', addr.front()], [cat.name, addr.cat(slug)], ['topic', null]]);
+    $('main').innerHTML = '<p class="dim">Loading…</p>';
+    say('Loading the topic');
+    got = await draw.readTopic(read, cat, tid);
   }
+  moderators = got.moderators || [];
+  const { t, posts = [] } = got;
   // Opening a topic reads it, up to the newest post that was in it.
-  seen?.markRead(topicId, seen.newest(posts));
-  const placed = new Set(t.posts);
-  const pending = waiting(topicId).filter(w => !placed.has(w.id));
-  $('main').innerHTML = `<div class="topline"><h1>${esc(t.name)}</h1>
-      <button class="primary" data-act="newpost" data-topic="${esc(topicId)}">New post</button></div>
-    ${topicActs(topicId)}
-
-    ${(await threaded(posts, authors, cat)).join('')}
-    ${pending.map(w => card({ author: w.author, published: w.at, content: toHtml(w.text) },
-      { cat, extra: ' waiting', waiting: true })).join('')}`;
+  if (t) seen?.markRead(topicId, seen.newest(posts));
+  const placed = new Set(t?.posts || []);
+  const pending = t ? waiting(topicId).filter(w => !placed.has(w.id))
+    .map(w => ({ author: w.author, published: w.at, content: toHtml(w.text) })) : [];
+  // A closed topic takes nothing more: the forum would refuse it anyway, so
+  // the drawing offers no way to add to it.
+  const out = draw.drawTopic({ cat, slug, ...got, pending }, drawing());
+  document.title = out.title;
+  if (!keep || pending.length) {
+    crumbs([['Home', addr.front()], [cat.name, addr.cat(slug)], [t ? t.name : 'topic', null]]);
+    $('main').innerHTML = out.main;
+  }
+  say(out.say);
+  if (!t) return;
   replyBox({ cat, title: 'Reply', inReplyToUrl: t.posts[t.posts.length - 1] || null, topicId });
   $('reply-row').hidden = true;      // the thread's own button opens it
-  // A closed topic takes nothing more: the forum would refuse it anyway, so
-  // the page does not offer it.
-  if (t.closed) {
-    for (const b of document.querySelectorAll('[data-act="newpost"], [data-act="reply"]')) b.remove();
-    const said = document.createElement('p');
-    said.className = 'hint';
-    said.textContent = 'This topic is closed. No more replies are being taken.';
-    document.querySelector('.topline')?.after(said);
-  }
   // Arriving from the front page: the post that was linked to, in view and
   // marked, rather than the top of a thread it sits somewhere inside.
-  say(`${t.name}, ${posts.length} post${posts.length === 1 ? '' : 's'}`);
   if (atPost) {
     const el = document.getElementById('p-' + atPost);
     // Taken to, not just scrolled to: a keyboard and a screen reader both land
@@ -755,8 +580,8 @@ async function signIn(handleInput, noteId = 'fedi-note') {
   if (/^https?:\/\//u.test(typed)) {
     $(noteId).textContent = 'Asking your pod…';
     try {
-      const { authorizationUrl, storageRoot } = await pod.signInWithWebId(typed, location.origin + location.pathname);
-      sessionStorage.setItem('bb:return', location.hash);
+      const { authorizationUrl, storageRoot } = await pod.signInWithWebId(typed, signInAddress);
+      sessionStorage.setItem('bb:return', whereNow());
       sessionStorage.setItem('bb:pod', JSON.stringify({ handle: authorLabel(typed), actor: typed, podHome: storageRoot }));
       location.href = authorizationUrl;
     } catch (e) { $(noteId).textContent = e.message; }
@@ -770,7 +595,7 @@ async function signIn(handleInput, noteId = 'fedi-note') {
   const said = await serverKind(host, front, undefined, handle);
   const kind = said.kind;
   if (kind === 'mastodon-api') {
-    sessionStorage.setItem('bb:return', location.hash);
+    sessionStorage.setItem('bb:return', whereNow());
     location.href = await login.begin(host);
     return;
   }
@@ -778,9 +603,9 @@ async function signIn(handleInput, noteId = 'fedi-note') {
   note.textContent = '';
   if (kind === 'fedipod') {
     if (!said.issuer || !said.actor) throw new Error(`${host} did not say where ${handleInput} signs in`);
-    sessionStorage.setItem('bb:return', location.hash);
+    sessionStorage.setItem('bb:return', whereNow());
     sessionStorage.setItem('bb:pod', JSON.stringify({ handle: `@${handle}@${host}`, actor: said.actor, podHome: said.podHome }));
-    location.href = await pod.signIn({ issuer: said.issuer, redirectUri: location.origin + location.pathname });
+    location.href = await pod.signIn({ issuer: said.issuer, redirectUri: signInAddress });
     return;
   }
   note.textContent = kind === 'lemmy'
@@ -985,8 +810,9 @@ async function openEdit(id) {
 // The address of this post on this site, for pasting anywhere. The thread is
 // what a person wants to open, and the post is named in it.
 async function share(id, btn) {
-  const hash = location.hash.startsWith('#/t/') ? location.hash : `#/t/${replyCtx.cat.slug}/${(await topicOf(id)) || ''}`;
-  const link = `${location.origin}${location.pathname}${hash}`;
+  const tid = (replyCtx?.topicId || '').split('/').pop() || (await topicOf(id)) || '';
+  const to = addr.topic(replyCtx.cat.slug, tid, await cacheKey(id));
+  const link = place.root ? location.origin + to : `${location.origin}${location.pathname}${location.search}${to}`;
   try { await navigator.clipboard.writeText(link); btn.textContent = 'Copied'; say('Link copied'); }
   catch { window.prompt('Copy this address', link); return; }
   setTimeout(() => { btn.textContent = 'Share'; }, 1500);
@@ -996,8 +822,9 @@ async function share(id, btn) {
 // thread: the card sits inside the topic's own list item.
 async function topicOf(id) {
   const li = [...document.querySelectorAll('ul.list li')].find(el => el.querySelector(`[data-post="${CSS.escape(id)}"]`));
-  const a = li?.querySelector('a[href^="#/t/"]');
-  return a ? a.getAttribute('href').split('/').pop() : null;
+  const href = li?.querySelector('a.title')?.getAttribute('href') || '';
+  if (href.startsWith('#/t/')) return href.split('/')[3] || null;
+  return place.root ? viewOfPath(new URL(href, location.href).pathname, place.root).tid || null : null;
 }
 
 async function report(id) {
@@ -1297,18 +1124,15 @@ async function modBan(who, slug) {
 // something says it, and the address it was read from otherwise.
 async function paintMods(ids) {
   if (!ids.length) return;
-  const cat = cats()[0];
-  const named = await Promise.all(ids.map(async (id) => {
-    const card = cat ? await authorOnce(cat.base, id).catch(() => null) : null;
-    const handle = card?.handle || await modLabel(id);
-    return `<a href="#/who/${encodeURIComponent(id)}">${esc(handle)}</a>`;
-  }));
-  $('mods-who').innerHTML = `<span class="lead">moderators:</span> ${named.join(', ')}`;
+  $('mods-who').innerHTML = draw.modsWho(await Promise.all(ids.map(async (id) => ({ id, handle: await modLabel(id) }))));
 }
 
-// What to call a moderator: the card the forum kept of them, then the actor's
-// own word for it, and a name read off the address only when neither answers.
+// What to call a moderator: what the drawn page called them, the card the
+// forum kept of them, then the actor's own word for it, and a name read off
+// the address only when none of those answers.
+const namedInPage = new Map((boot?.names || []).map(n => [n.id, n.handle]));
 async function modLabel(actorId) {
+  if (namedInPage.has(actorId)) return namedInPage.get(actorId);
   const cat = cats()[0];
   const card = cat ? await authorOnce(cat.base, actorId) : null;
   if (card?.handle) return card.handle;
@@ -1607,6 +1431,16 @@ $('reply-send').addEventListener('click', async () => {
   $('reply-send').disabled = false;
 });
 
+// Back to where the reader was before signing in, with the sign-in's own part
+// of the address gone, so a reload does not replay it.
+function goBack(query) {
+  const back = sessionStorage.getItem('bb:return') || '';
+  sessionStorage.removeItem('bb:return');
+  const cut = back.indexOf('#');
+  const [path, hash] = back.startsWith('/') ? [cut < 0 ? back : back.slice(0, cut), cut < 0 ? '' : back.slice(cut)] : [location.pathname, back];
+  history.replaceState(null, '', `${path}${query ? '?' + query : ''}${hash}`);
+}
+
 // Back from the reader's server with a code: finish the sign-in, then clean
 // the address so a reload does not replay it.
 (async () => {
@@ -1633,10 +1467,7 @@ $('reply-send').addEventListener('click', async () => {
         try { localStorage.setItem('bb:acct', JSON.stringify(who)); } catch { /* blocked storage */ }
         sessionStorage.removeItem('bb:pod');
         params.delete('code'); params.delete('state'); params.delete('iss');
-        const q = String(params);
-        const back = sessionStorage.getItem('bb:return') || '';
-        sessionStorage.removeItem('bb:return');
-        history.replaceState(null, '', `${location.pathname}${q ? '?' + q : ''}${back}`);
+        goBack(String(params));
       }
     } catch (e) { $('reply-err').textContent = e.message; }
   }
@@ -1646,15 +1477,32 @@ $('reply-send').addEventListener('click', async () => {
     try {
       await login.complete({ state, code });
       params.delete('code'); params.delete('state');
-      const back = sessionStorage.getItem('bb:return') || '';
-      sessionStorage.removeItem('bb:return');
-      const q = String(params);
-      history.replaceState(null, '', `${location.pathname}${q ? '?' + q : ''}${back}`);
+      goBack(String(params));
     } catch (e) { $('reply-err').textContent = e.message; }
   }
   // Sign-up lives at the Gateway, which is this page's own site or the one it is a face of.
   $('fedipod-signup').href = front + '/new-account';
-  window.addEventListener('hashchange', () => route());
+  // A link to a post on the page being read moves to it; anything else is a
+  // view of its own.
+  window.addEventListener('hashchange', () => { if (viewKey() !== routed) route(); });
+  window.addEventListener('popstate', () => route());
+  // At the forum's own host, going between the front page and a category is
+  // a different filter on what the page already holds: no load and no reads,
+  // as long as it holds it.
+  if (place.root) {
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest?.('a[href]');
+      if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const to = new URL(a.getAttribute('href'), location.href);
+      if (to.origin !== location.origin || to.search || to.hash) return;
+      const v = viewOfPath(to.pathname, place.root);
+      const filtering = to.pathname === place.root || v.kind === 'cat';
+      if (!filtering || !indexHolds(index, Math.min(300, shown * 5))) return;
+      e.preventDefault();
+      history.pushState(null, '', to.pathname);
+      route();
+    });
+  }
   await load();
   // Whatever the reader pressed before being asked to sign in. After `load`,
   // because voting and joining both need the categories to be known.

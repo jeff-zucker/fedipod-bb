@@ -36,14 +36,24 @@ const escText = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const linkable = (href) => { try { return ['http:', 'https:', 'mailto:'].includes(new URL(href).protocol); } catch { return false; } };
 const inert = (html) => new DOMParser().parseFromString(html, 'text/html').body;
 
-function rebuild(node) {
+// The words under a node, as a reader sees them.
+const wordsOf = (n) => (n.nodeType === 3 ? String(n.nodeValue ?? '')
+  : n.nodeType === 1 ? [...n.childNodes].map(wordsOf).join('') : '');
+
+// `drop(href, words)` names links to leave out; a paragraph a dropped link
+// leaves with nothing in it goes too.
+function rebuild(node, drop = null, left = { dropped: false }) {
   let out = '';
   for (const n of node.childNodes) {
     if (n.nodeType === 3) { out += escText(n.nodeValue); continue; }
     if (n.nodeType !== 1) continue;
     const tag = n.nodeName.toLowerCase();
     if (DROP.has(tag)) continue;
-    if (!KEEP.has(tag)) { out += rebuild(n); continue; }
+    if (!KEEP.has(tag)) { out += rebuild(n, drop, left); continue; }
+    if (tag === 'a' && drop?.([...n.attributes].find(a => a.name.toLowerCase() === 'href')?.value ?? null, wordsOf(n).trim())) {
+      left.dropped = true;
+      continue;
+    }
     let attrs = '';
     for (const a of n.attributes) {
       const name = a.name.toLowerCase();
@@ -51,14 +61,21 @@ function rebuild(node) {
       attrs += ` ${name}="${escText(a.value)}"`;
     }
     if (tag === 'a') attrs += ' rel="nofollow noopener noreferrer"';
-    out += tag === 'br' ? '<br>' : `<${tag}${attrs}>${rebuild(n)}</${tag}>`;
+    if (tag === 'p' && drop) {
+      const mine = { dropped: false };
+      const inner = rebuild(n, drop, mine);
+      if (mine.dropped) left.dropped = true;
+      if (!(mine.dropped && !inner.replace(/<[^>]*>/gu, '').trim() && !/<a\b/u.test(inner))) out += `<p${attrs}>${inner}</p>`;
+      continue;
+    }
+    out += tag === 'br' ? '<br>' : `<${tag}${attrs}>${rebuild(n, drop, left)}</${tag}>`;
   }
   return out;
 }
 
-export function cleanHtml(html, parse = inert) {
+export function cleanHtml(html, parse = inert, { drop = null } = {}) {
   const text = textOf(html);
-  return text ? rebuild(parse(text)) : '';
+  return text ? rebuild(parse(text), drop) : '';
 }
 
 // Where a forum is read from: through a Gateway at `<origin>/u/<handle>/`, or
@@ -81,7 +98,28 @@ export function placeOf({ origin, pathname = '/', search = '' }) {
   const fromPath = own ? decodeURIComponent(pathname.split('/').filter(Boolean)[0] || '') : '';
   const handle = params.get('forum') || fromPath || null;
   const pod = params.get('pod');
-  return { front, handle, pod, base: pod || handle ? forumBase({ origin: front, handle, pod }) : null };
+  // At its own host a forum's views have addresses under its own path.
+  const root = own && fromPath && !params.get('forum') && !pod ? `/${encodeURIComponent(fromPath)}/` : null;
+  return { front, handle, pod, own, root, base: pod || handle ? forumBase({ origin: front, handle, pod }) : null };
+}
+
+// Which view an address at the forum's own host names: the front page, a
+// category, or a topic. Anything else under the forum's path is its front page.
+export function viewOfPath(pathname, root) {
+  if (!root || !pathname.startsWith(root)) return { kind: 'front' };
+  const [kind, a, b] = pathname.slice(root.length).split('/').map(s => { try { return decodeURIComponent(s); } catch { return s; } });
+  if (kind === 'c' && a) return { kind: 'cat', slug: a };
+  if (kind === 't' && a && b) return { kind: 'topic', slug: a, tid: b };
+  return { kind: 'front' };
+}
+
+// A few at a time: `fn` over `items`, in order, never more than `n` waiting.
+export async function inTurn(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const one = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); } };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, one));
+  return out;
 }
 
 // The name a cached copy is filed under (the same digest the host uses).
@@ -100,7 +138,9 @@ export function authorLabel(actorId) {
   } catch { return String(actorId); }
 }
 
-export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session = null } = {}) {
+// `at`: how many documents are asked for at once. The page asks one at a time;
+// the server that draws a page asks a few at a time to finish in its time.
+export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session = null, at = 1 } = {}) {
   // A topic's name and how many posts are in it, read once however many of
   // its posts a feed carries.
   const topicInfo = async (topicId, seen) => {
@@ -150,12 +190,13 @@ export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session =
       const actor = await get(base + 'ap/actor');
       if (!actor) return null;
       const list = await get(base + 'ap/categories');
-      const categories = [];
-      for (const id of (list?.orderedItems || [])) {
+      const read = await inTurn(list?.orderedItems || [], at, async (id) => {
         const a = await get(id);
-        if (!a) continue;
+        return a ? { id, a, followers: await get(categoryBase(a.id || id) + 'ap/followers') } : null;
+      });
+      const categories = [];
+      for (const { id, a, followers } of read.filter(Boolean)) {
         const cbase = categoryBase(a.id || id);
-        const followers = await get(cbase + 'ap/followers');
         categories.push({
           id: a.id || id, base: cbase, slug: a.preferredUsername || null,
           name: a.name || a.preferredUsername || id, summary: a.summary || null,
@@ -167,15 +208,15 @@ export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session =
         });
       }
       // Who runs it (FEP-baf5), each with the page a person is sent to.
-      const admins = [];
-      for (const id of ((await get(base + 'ap/administrators'))?.orderedItems || []).map(idOf).filter(Boolean)) {
+      const adminIds = ((await get(base + 'ap/administrators'))?.orderedItems || []).map(idOf).filter(Boolean);
+      const admins = await inTurn(adminIds, at, async (id) => {
         const a = await get(id);
-        admins.push({
+        return {
           id,
           handle: a?.preferredUsername && a?.id ? `@${a.preferredUsername}@${new URL(a.id).host}` : authorLabel(id),
           url: (typeof a?.url === 'string' && a.url) || id,
-        });
-      }
+        };
+      });
       const heartbeat = await get(base + 'ap/heartbeat');
       return { id: actor.id, name: actor.name || actor.preferredUsername, summary: actor.summary || null,
         handle: actor.preferredUsername || null, categories, admins, lastHosted: heartbeat?.at || null };
@@ -257,8 +298,10 @@ export function reader({ fetch: f = globalThis.fetch.bind(globalThis), session =
       const ids = all.slice(from, from + limit);
       const out = [];
       const named = new Map();
-      for (const url of ids) {
-        const copy = await get(url);
+      const copies = await inTurn(ids, at, (url) => get(url));
+      await inTurn([...new Set(copies.map(c => idOf(c?.context)).filter(Boolean))], at, (t) => topicInfo(t, named));
+      for (const [i, url] of ids.entries()) {
+        const copy = copies[i];
         if (!copy || copy.type === 'Tombstone') continue;
         out.push({
           id: copy.id || url,

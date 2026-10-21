@@ -17,6 +17,9 @@ import { keeperSession } from 'fedipod/gateway/keeper-session.mjs';
 import { ForumAgent } from './forum-agent.mjs';
 import * as publish from './publish.mjs';
 
+// The forum's page at its own host, drawn for the gateway to send.
+export { renderPage } from './render.mjs';
+
 // How soon a run comes back for an ask that could not be applied yet.
 const ASK_RETRY_MS = 60_000;
 

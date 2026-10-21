@@ -9,7 +9,7 @@ import * as fwire from '../src/wire.mjs';
 import * as topics from '../src/topics.mjs';
 import * as publish from '../src/publish.mjs';
 import { PodStore } from 'fedipod/core/store.mjs';
-import { reader, forumBase, placeOf, cacheKey, authorLabel } from '../site/read.mjs';
+import { reader, forumBase, placeOf, viewOfPath, cacheKey, authorLabel } from '../site/read.mjs';
 import { MastoLogin, cleanHost, hostOfHandle, serverKind, actorOfHandle } from '../site/masto.mjs';
 import { readState } from '../site/seen.mjs';
 
@@ -108,9 +108,14 @@ test('the website reads a forum the host wrote: categories, topics, posts and th
 
 test('where the page runs names the forum: ?forum= at the site, the path at bb.<site>, ?pod= anywhere', () => {
   const at = placeOf({ origin: 'https://fedipod.net', pathname: '/bb/', search: '?forum=forum' });
-  assert.deepEqual(at, { front: 'https://fedipod.net', handle: 'forum', pod: null, base: 'https://fedipod.net/u/forum/' });
+  assert.deepEqual(at, { front: 'https://fedipod.net', handle: 'forum', pod: null, own: false, root: null, base: 'https://fedipod.net/u/forum/' });
   const own = placeOf({ origin: 'https://bb.fedipod.net', pathname: '/forum/', search: '' });
-  assert.deepEqual(own, { front: 'https://fedipod.net', handle: 'forum', pod: null, base: 'https://fedipod.net/u/forum/' }, 'read through the Gateway it is a face of');
+  assert.deepEqual(own, { front: 'https://fedipod.net', handle: 'forum', pod: null, own: true, root: '/forum/', base: 'https://fedipod.net/u/forum/' }, 'read through the Gateway it is a face of');
+  assert.equal(placeOf({ origin: 'https://bb.fedipod.net', pathname: '/forum/t/fedipod/abc', search: '' }).root, '/forum/', 'a topic is under the forum\'s own path');
+  assert.deepEqual(viewOfPath('/forum/t/fedipod/abc', '/forum/'), { kind: 'topic', slug: 'fedipod', tid: 'abc' });
+  assert.deepEqual(viewOfPath('/forum/c/solid', '/forum/'), { kind: 'cat', slug: 'solid' });
+  assert.deepEqual(viewOfPath('/forum/', '/forum/'), { kind: 'front' });
+  assert.deepEqual(viewOfPath('/forum/elsewhere', '/forum/'), { kind: 'front' });
   assert.equal(placeOf({ origin: 'https://bb.fedipod.net', pathname: '/', search: '' }).base, null, 'no forum named');
   const pod = placeOf({ origin: 'https://bb.fedipod.net', pathname: '/', search: '?pod=https://fp3.solidcommunity.net/fedipod-bb/' });
   assert.equal(pod.base, 'https://fp3.solidcommunity.net/fedipod-bb/');
