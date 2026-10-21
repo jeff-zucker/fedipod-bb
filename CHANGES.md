@@ -4,6 +4,12 @@ Changes up to and including 0.4.1 are recorded in FediPod's
 [CHANGES.md](https://github.com/jeff-zucker/FediPod/blob/main/CHANGES.md),
 under the headings that name fedipod-bb.
 
+## 2026-10-21 (the forum's own robots.txt — version 0.5.1)
+
+**The forum's host asks search engines to stay out**, with a `robots.txt`
+that comes with the forum's page. Only the front page, a category and a topic
+arrive drawn; any other address under the forum is built in the browser.
+
 ## 2026-10-21 (forum pages arrive drawn — version 0.5.0)
 
 **At a forum's own host, the front page, each category and each topic arrive
