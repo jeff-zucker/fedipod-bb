@@ -199,6 +199,9 @@ test('what cannot be drawn whole is not drawn at all', async () => {
   assert.equal(await renderPage({ url: url + '?code=x&state=y', shell: SHELL, fetch: f.fetch }), null, 'an address with a query, as a sign-in comes back to');
   assert.equal(await renderPage({ url: `https://fedipod.net/forum/t/gardening/${f.tid}`, shell: SHELL, fetch: f.fetch }), null, 'only at the forum\'s own host');
   assert.equal(await renderPage({ url, shell: '<html>nothing to fill</html>', fetch: f.fetch }), null, 'a page without its parts');
+  for (const other of ['https://bb.fedipod.net/forum/who/x', 'https://bb.fedipod.net/forum/t/gardening', 'https://bb.fedipod.net/forum/c/a/b']) {
+    assert.equal(await renderPage({ url: other, shell: SHELL, fetch: f.fetch }), null, `${other} is not a view the server draws`);
+  }
 });
 
 test('what rides in the page cannot end the element it rides in', async () => {

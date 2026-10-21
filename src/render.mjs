@@ -52,6 +52,9 @@ function fill(shell, { title, description, forumName, forumHref, modsLine, acts,
 async function draw(url, shell, f) {
   const place = placeOf({ origin: url.origin, pathname: url.pathname, search: '' });
   if (!place.own || !place.root || !place.base) return null;
+  // Drawn: the front page, a category, a topic. Any other address under the
+  // forum is the page's own to build.
+  if (!/^(?:c\/[^/]+|t\/[^/]+\/[^/]+)?\/?$/u.test(url.pathname.slice(place.root.length))) return null;
   const view = viewOfPath(url.pathname, place.root);
   const read = reader({ fetch: f, at: AT });
   const forum = await read.forum(place.base);
