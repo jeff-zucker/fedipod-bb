@@ -198,7 +198,23 @@ export async function keepOnce(ctx, handle, rec, { log = console.log, session = 
     prepare?.(forum);   // a test's origins, in place of the network
     if (!await forum.lease.acquire()) return { skipped: 'another host has the forum', retry: 'soon' };
     try {
+      // A forum on a pod it has not published to — moved there, its rows
+      // naming the new pod — is published there whole, and what that pod
+      // lacks is read again from where its authors keep it. Recorded once
+      // done, so it is done once.
+      const moved = forum.store.read('home.json', {}).home !== f.home;
+      if (moved) {
+        forum.store.setConfig({ ...forum.store.getConfig(), republish: true });
+        forum.config = forum.store.getConfig();
+      }
       await forum.publishAll();
+      if (moved) {
+        const n = await forum.refillCopies().catch((e) => { say(`copying again: ${e.message}`); return null; });
+        if (n !== null) {
+          forum.store.write('home.json', { home: f.home, at: new Date().toISOString() });
+          say(`published whole at ${f.home}${n ? `; ${n} post(s) copied again from their authors` : ''}`);
+        }
+      }
       await forum.intake.drain();
       await forum.applyVerifiedAsks().catch((e) => say(`asks: ${e.message}`));
       await forum.publishModQueue().catch((e) => say(`queue: ${e.message}`));

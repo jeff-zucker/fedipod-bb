@@ -415,6 +415,9 @@ function forgetIndex() { index = null; authors.clear(); }
 // minute, instead of being kept for a minute without it.
 const SENT_EVERY_MS = 5_000;
 const SENT_WAIT_MS = 30_000;
+// How long a post of this reader's may wait for the forum before the page
+// offers to send it again.
+const RESEND_AFTER_MS = 3_600_000;
 let sent = null;               // { id, until }
 const waitingOnSent = (idx) => sentNotListed(sent, idx?.latest);
 const indexHolds = (idx, want) => !!idx && idx.limit >= want
@@ -523,8 +526,11 @@ async function showTopic(slug, tid, atPost = null) {
   // Opening a topic reads it, up to the newest post that was in it.
   if (t) seen?.markRead(topicId, seen.newest(posts));
   const placed = new Set(t?.posts || []);
+  // A post of this reader's own that has waited an hour can be sent again.
+  const resendable = (w) => !!podAcct && (w.author === podAcct.handle || w.author === podAcct.actor)
+    && Date.now() - Date.parse(w.at) > RESEND_AFTER_MS;
   const pending = t ? waiting(topicId).filter(w => !placed.has(w.id))
-    .map(w => ({ author: w.author, published: w.at, content: toHtml(w.text) })) : [];
+    .map(w => ({ id: w.id, author: w.author, published: w.at, content: toHtml(w.text), resend: resendable(w) })) : [];
   // A closed topic takes nothing more: the forum would refuse it anyway, so
   // the drawing offers no way to add to it.
   const out = draw.drawTopic({ cat, slug, ...got, pending }, drawing());
@@ -678,6 +684,7 @@ $('main').addEventListener('click', async (e) => {
   if (act === 'share') return share(id, b);
   if (act === 'report') return report(id);
   if (act === 'remove') return modRemove(id);
+  if (act === 'resend') return resendPost(id, b);
   const topic = b.dataset.topic || b.closest('[data-topic]')?.dataset.topic;
   if (act === 'more') { shown += 30; return showForum(); }
   if (act === 'order') {
@@ -825,6 +832,24 @@ async function topicOf(id) {
   const href = li?.querySelector('a.title')?.getAttribute('href') || '';
   if (href.startsWith('#/t/')) return href.split('/')[3] || null;
   return place.root ? viewOfPath(new URL(href, location.href).pathname, place.root).tid || null : null;
+}
+
+// One of this reader's own posts the forum never took in, handed to it again.
+// It stays marked as waiting until the forum lists it.
+async function resendPost(id, btn) {
+  const cat = replyCtx?.cat;
+  if (!cat || !podAcct || !id) return;
+  btn.disabled = true;
+  try {
+    const inbox = await pod.podInboxOf(cat.id);
+    if (!inbox) throw new Error('the forum did not say where to send it');
+    await pod.resend({ actor: podAcct.actor, podHome: podAcct.podHome, id, inbox });
+    say('Sent again. It shows here once the forum has it.');
+    sent = { id, until: Date.now() + SENT_WAIT_MS };
+    forgetIndex();
+    freshRead = true;
+    try { await route(); } finally { freshRead = false; }
+  } catch (e) { btn.disabled = false; alert(e.message); }
 }
 
 async function report(id) {

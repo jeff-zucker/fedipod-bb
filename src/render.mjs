@@ -19,10 +19,10 @@ const node = (n) => (n.type === 'text' ? { nodeType: 3, nodeValue: n.data }
     : { nodeType: 8 });
 export const parse = (html) => ({ childNodes: parseDocument(html).children.map(node) });
 
-// How many documents are asked for at once, and how long the whole may take
-// before the page goes out undrawn instead.
+// How many documents are asked for at once, and how long a reader waits for
+// the drawing before the page goes out undrawn instead.
 const AT = 8;
-const DEADLINE_MS = 6000;
+const DEADLINE_MS = 2000;
 // Enough posts to fill a page of topics, as the page asks for.
 const FRONT_POSTS = 150;
 
@@ -114,15 +114,22 @@ async function draw(url, shell, f) {
  * The page for `url` at a forum's own host (`https://bb.<gateway>/<forum>/…`),
  * drawn from `shell` (the page as the site serves it), reading the forum
  * through `fetch`. Returns { status, html, tags } or null: null means send
- * the page undrawn. Never throws.
+ * the page undrawn. Never throws. A drawing that is not done in time goes on
+ * reading after the page has gone, when `keepGoing(promise)` lets it (the
+ * host's waitUntil): what it reads is then at hand for the next reader.
  */
-export async function renderPage({ url, shell, fetch: f = globalThis.fetch.bind(globalThis), deadlineMs = DEADLINE_MS }) {
+export async function renderPage({ url, shell, fetch: f = globalThis.fetch.bind(globalThis), deadlineMs = DEADLINE_MS, keepGoing = null }) {
   let u;
   try { u = new URL(url); } catch { return null; }
   if (u.search || !shell) return null;
+  const work = draw(u, shell, f).catch(() => null);
   let timer;
-  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), deadlineMs); });
+  const LATE = Symbol('late');
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(LATE), deadlineMs); });
   try {
-    return await Promise.race([draw(u, shell, f).catch(() => null), late]);
+    const out = await Promise.race([work, late]);
+    if (out !== LATE) return out;
+    try { keepGoing?.(work); } catch { /* the host would not wait */ }
+    return null;
   } finally { clearTimeout(timer); }
 }

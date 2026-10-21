@@ -88,13 +88,11 @@ first path segment: `https://bb.fedipod.net/<handle>/`. It still reads
 through `<domain>`, where the handles live (the hosts are `BB_HOSTS` in the
 staging script). Anyone reads.
 
-<!-- CLAUDE 2026-10-21 — drawn pages at the forum's own host; delete these markers when done -->
 At `bb.<domain>`, when the Gateway there keeps the forum, the front page, each
 category (`/<handle>/c/<slug>`) and each topic (`/<handle>/t/<slug>/<topic>`)
 arrive already drawn, as someone without an account sees them; the page then
 adds only what depends on who is reading. `bb.<domain>` asks search engines
 to stay out.
-<!-- /CLAUDE -->
 A topic whose newest post arrived since the reader last opened it is marked
 `New` on the index. The mark is the reader's own: one entry per topic in their
 browser's storage, written nowhere else and sent nowhere - a public forum has

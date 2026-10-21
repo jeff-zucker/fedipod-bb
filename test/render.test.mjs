@@ -115,6 +115,17 @@ test('the front page lists what a stranger may read, linked by the topic\'s own 
   assert.match(main, /<a class="chip on" aria-current="page" href="\/forum\/">All<\/a>/u);
   assert.match(main, /<a class="chip" href="\/forum\/c\/seeds">Seed swap<\/a>/u);
   assert.doesNotMatch(out.html, /heirloom/u, 'a members-only post is on no drawn page, nor in what rides with it');
+  // Pinned across the forum and pinned in a category: two different pins.
+  const site = 'https://forum.example/fedipod-bb/ap/featured';
+  const garden = f.g.featured;
+  f.docs.set(site, { id: site, type: 'OrderedCollection', orderedItems: [f.g.topic(f.tid)] });
+  const both = mainOf((await renderPage({ url: 'https://bb.fedipod.net/forum/', shell: SHELL, fetch: f.fetch })).html);
+  assert.match(both, /aria-label="pinned across the forum">📌<\/span>/u, 'a pushpin across the forum');
+  f.docs.set(site, { id: site, type: 'OrderedCollection', orderedItems: [] });
+  f.docs.set(garden, { id: garden, type: 'OrderedCollection', orderedItems: [f.g.topic(f.tid)] });
+  const cat = mainOf((await renderPage({ url: 'https://bb.fedipod.net/forum/', shell: SHELL, fetch: f.fetch })).html);
+  assert.match(cat, /aria-label="pinned in this category">📍<\/span>/u, 'a round pin within its category');
+  assert.doesNotMatch(cat, /⭐/u);
   assert.match(out.html, /<span id="mods-acts">[\s\S]*data-act="newtopic"/u);
   assert.match(out.html, /<nav class="crumbs" id="crumbs" aria-label="Breadcrumb" hidden><\/nav>/u, 'the front page has no trail');
   const data = dataOf(out.html);
@@ -173,6 +184,18 @@ test('what cannot be drawn whole is not drawn at all', async () => {
   const started = Date.now();
   assert.equal(await renderPage({ url, shell: SHELL, fetch: slow, deadlineMs: 300 }), null, 'past its time');
   assert.ok(Date.now() - started < 1000, 'and it does not wait for the reads to finish');
+  // Past its time, the drawing is handed to the host to finish after the
+  // page has gone, and it does finish: its reads are what the next reader's
+  // drawing finds at hand.
+  let kept = null;
+  f.asked.length = 0;
+  assert.equal(await renderPage({ url, shell: SHELL, fetch: slow, deadlineMs: 300, keepGoing: (p) => { kept = p; } }), null);
+  assert.ok(kept, 'the unfinished drawing is handed over');
+  const finished = await kept;
+  assert.equal(finished?.status, 200, 'and it finishes');
+  assert.ok(f.asked.some(u => u.includes(`/ap/topic/${f.tid}`)), 'having read the topic');
+  assert.equal(await renderPage({ url, shell: SHELL, fetch: slow, deadlineMs: 300, keepGoing: () => { throw new Error('no'); } }), null,
+    'a host that will not wait still gets the page undrawn');
   assert.equal(await renderPage({ url: url + '?code=x&state=y', shell: SHELL, fetch: f.fetch }), null, 'an address with a query, as a sign-in comes back to');
   assert.equal(await renderPage({ url: `https://fedipod.net/forum/t/gardening/${f.tid}`, shell: SHELL, fetch: f.fetch }), null, 'only at the forum\'s own host');
   assert.equal(await renderPage({ url, shell: '<html>nothing to fill</html>', fetch: f.fetch }), null, 'a page without its parts');

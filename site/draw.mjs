@@ -114,6 +114,9 @@ export function card(p, { author = null, cat = null, extra = '', waiting = false
     <div class="who"><b>${waiting ? '<span class="dim">waiting for the forum · </span>' : ''}${byline(p, author)}</b>
       <span class="when">${esc(at)}${elsewhere(p)}</span></div>
     <div class="body">${p.gone ? 'This post was removed.' : (body(p, cat, d) || '<span class="dim">(not readable here)</span>')}</div>
+    ${waiting && p.resend && p.id ? `<div class="acts" data-post="${esc(p.id)}">
+      <button data-act="resend" aria-label="Send your post to the forum again">Send again</button>
+    </div>` : ''}
     ${p.gone || waiting || !p.id ? '' : `<div class="acts" data-post="${esc(p.id)}">
       ${closed ? '' : `<button data-act="reply" aria-label="Reply to ${whose}">Reply</button>`}
       ${votes(p, d)}
@@ -300,7 +303,7 @@ export function drawFront({ forum, cats, filter, finding = '', order = 'date', d
     if (isNew) out.fresh += 1;
     const by = who ? who.handle : (p.author ? authorLabel(p.author) : '');
     tr.push(`<tr>
-      <td>${pins.site.has(p.topic) ? '<span class="pin" title="Pinned across the forum" role="img" aria-label="pinned across the forum">⭐</span> ' : pins.cat.has(p.topic) ? '<span class="pin" title="Pinned in this category" role="img" aria-label="pinned in this category">📌</span> ' : ''}${href ? `<a href="${esc(href)}">${name}</a>` : name}${isNew
+      <td>${pins.site.has(p.topic) ? '<span class="pin" title="Pinned across the forum" role="img" aria-label="pinned across the forum">📌</span> ' : pins.cat.has(p.topic) ? '<span class="pin" title="Pinned in this category" role="img" aria-label="pinned in this category">📍</span> ' : ''}${href ? `<a href="${esc(href)}">${name}</a>` : name}${isNew
         ? ' <span class="badge">New<span class="vh"> since you last opened this topic</span></span>' : ''}</td>
       <td>${cat ? esc(cat.name) : ''}</td>
       <td>${by ? (p.author

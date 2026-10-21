@@ -557,6 +557,14 @@ test('a republish keeps the pinned topics in the category\'s featured list', asy
   agent.config = agent.store.getConfig();
   await agent.publishAll();
   assert.deepEqual(pod.docs.get(g.urls.featured)?.orderedItems, [g.urls.topic(tid)], 'and still is after a forced republish');
+  // Pinned across the whole forum: the forum's own featured list, which a
+  // forced republish (a rename, a move) must leave as the forum's record says.
+  await agent.sitePin(g.urls.topic(tid), true);
+  assert.deepEqual(pod.docs.get(agent.site.featured)?.orderedItems, [g.urls.topic(tid)], 'pinned across the forum');
+  agent.store.setConfig({ ...agent.store.getConfig(), republish: true });
+  agent.config = agent.store.getConfig();
+  await agent.publishAll();
+  assert.deepEqual(pod.docs.get(agent.site.featured)?.orderedItems, [g.urls.topic(tid)], 'and still is after a forced republish');
 });
 
 test('a moderator ask is forum-wide whichever list it names, and every category hears it at once', async () => {

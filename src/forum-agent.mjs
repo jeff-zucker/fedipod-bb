@@ -490,14 +490,21 @@ export class ForumAgent {
   // A pin that holds across the whole forum, not just one category: the site
   // actor has a featured collection of its own, and this is it.
   async sitePin(topicId, on) {
-    const { orderedCollection } = await import('fedipod/core/wire.mjs');
-    const collection = await import('fedipod/pod/collection.mjs');
     const held = this.store.read('sitepins.json', []).filter(id => id !== topicId);
     const ids = on ? [topicId, ...held] : held;
     this.store.write('sitepins.json', ids);
+    await this.publishSitePins();
+    return { pinned: ids };
+  }
+
+  // The forum-wide pinned topics, from the forum's own record.
+  async publishSitePins() {
+    const { orderedCollection } = await import('fedipod/core/wire.mjs');
+    const collection = await import('fedipod/pod/collection.mjs');
+    const ids = this.store.read('sitepins.json', []);
     await collection.writeFlat(this.remote, this.site.featured,
       orderedCollection(this.site.featured, ids), { publicRead: true });
-    return { pinned: ids };
+    return ids;
   }
 
   // A post from someone who is not a member. 'members' drops it, which is
@@ -710,6 +717,52 @@ export class ForumAgent {
     }
   }
 
+  // Copies a pod should hold and does not, as on a pod the forum has just
+  // moved to: each post's readable copy read again from where its author
+  // keeps it, with its counts from the forum's own record, and each author's
+  // card. A copy the pod will not say anything about is left alone. Returns
+  // how many posts were copied again.
+  async refillCopies() {
+    let filled = 0;
+    const missing = async (url) => { try { return (await this.remote.getJson(url)) === null; } catch { return false; } };
+    for (const cat of this.categories) {
+      const votes = cat.store.read('votes.json', {});
+      for (const entry of topics.list(cat.store)) {
+        const doc = topics.get(cat.store, entry.tid);
+        for (const p of doc?.posts || []) {
+          if (!await missing(cat.urls.cached(p.id))) continue;
+          const note = await cat.intake.fetchAP(p.id).catch(() => null) || await this.goneAt(p.id);
+          // Taken down by its author: the copy says so, as the forum's own does
+          // when the author's Delete arrives.
+          if (note?.type === 'Tombstone') {
+            await publish.tombstoneCached(cat, p.id, { formerType: note.formerType || 'Note' });
+            filled += 1;
+            continue;
+          }
+          if (!note?.id) { this.log(`${p.id}: no copy here, and its author's server did not give it`); continue; }
+          const v = votes[p.id];
+          await publish.cachePost(cat, note, { topic: cat.urls.topic(entry.tid),
+            replies: doc.posts.filter(x => x.inReplyTo === p.id).length,
+            likes: Array.isArray(v) ? v.length : (v?.up || []).length, dislikes: Array.isArray(v) ? 0 : (v?.down || []).length });
+          filled += 1;
+          if (p.author && await missing(cat.urls.cached(p.author))) {
+            const card = await cat.intake.fetchAP(p.author).catch(() => null);
+            if (card?.id) await publish.cacheAuthor(cat, card).catch(e => this.log(`author card for ${p.author}: ${e.message}`));
+          }
+        }
+      }
+    }
+    return filled;
+  }
+
+  // A post its author's server says is gone (410), as the Tombstone it is.
+  async goneAt(url) {
+    const r = await (this.probeFetch || globalThis.fetch)(url, { headers: { accept: 'application/activity+json' } }).catch(() => null);
+    if (r?.status !== 410) return null;
+    const body = await r.json().catch(() => ({}));
+    return { type: 'Tombstone', formerType: body?.formerType || 'Note' };
+  }
+
   rebuildLatest() {
     const rows = [];
     for (const cat of this.categories) {
@@ -807,7 +860,12 @@ export class ForumAgent {
     // that publish is forgotten here and the publish below writes it.
     if (redo) this.store.write('published.json', { ...this.store.read('published.json', {}), categories: null, latest: null, administrators: null });
     const seen = this.store.read('published.json', {});
-    if (force || !seen.actorDigest) await this.siteAgent.publisher.publishProfile({ force });
+    if (force || !seen.actorDigest) {
+      const profile = await this.siteAgent.publisher.publishProfile({ force });
+      // The profile publish wrote the forum's featured list as its pinned
+      // posts, of which a forum has none: the forum-wide pinned topics go back.
+      if (!profile?.skipped) await this.publishSitePins();
+    }
     await publish.publishCategories(this.siteAgent, this.categories.map(c => c.urls.actor), { force });
     if (!this.store.read('latest.json', []).length) {
       const n = this.rebuildLatest();

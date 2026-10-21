@@ -156,6 +156,23 @@ export async function signInWithWebId(webId, redirectUri) {
 // forum's inbox. A post has no title of its own; when it opens a topic, the
 // activity that opens it carries the TOPIC's name, which is a different
 // thing and belongs to the topic.
+// A post the forum never took in, handed to it again as it was the first
+// time: the same post, read back from the author's own pod, in the same
+// Create. The forum adds a post to its topic once and carries it once,
+// however often it arrives.
+export async function resend({ actor, podHome, id, inbox, session = null, fetch: f = globalThis.fetch.bind(globalThis) }) {
+  const s = session || await getSession();
+  if (!s) throw new Error('sign in to your pod first');
+  const r = await s.fetch(podUrlOf(actor, podHome, id), { headers: { accept: 'application/activity+json' } });
+  if (!r.ok) throw new Error(`your pod could not give the post back (HTTP ${r.status})`);
+  const note = await r.json();
+  const create = { '@context': AS, id: `${id}#create`, type: 'Create', actor, published: note.published,
+    object: note, to: note.to || [], cc: note.cc || [] };
+  const sent = await f(inbox, { method: 'POST', headers: { 'content-type': 'application/ld+json' }, body: JSON.stringify(create) });
+  if (!sent.ok) throw new Error(`the forum did not take it (HTTP ${sent.status})`);
+  return { id };
+}
+
 export async function post({ actor, podHome, category, categoryBase = null, categoryHandle, isPrivate = false,
   inbox, topic = '', title = '', text, inReplyTo = null, context = null }) {
   const s = await getSession();

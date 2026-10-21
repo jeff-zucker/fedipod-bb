@@ -24,6 +24,14 @@ words**, and the browser tab shows the topic's or category's name.
 started on, and then to that page, so a reader's server is asked to approve
 one address.
 
+**A topic pinned across the whole forum shows 📌, and one pinned in its
+category shows 📍.** Renaming or moving the forum keeps what is pinned across
+it; it used to unpin it.
+
+**A post of yours the forum never took in can be sent again.** Once it has
+waited an hour, your post in a topic offers Send again; the forum adds it
+once, however often it arrives.
+
 ## 2026-10-10 (a reply shows in the list of topics within seconds — version 0.4.4)
 
 **A reply you post shows in the forum's list of topics as soon as the forum

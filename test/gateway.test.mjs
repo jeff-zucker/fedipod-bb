@@ -110,6 +110,40 @@ test('placed at the door: the post is in its topic and its copy written, the ite
     || JSON.parse((await kv.get('forum/lease')).text).expiresAt === 0, 'the forum\'s lease is given back');
 });
 
+test('a forum on a pod it has not published to is published whole there, once, with missing copies read again', async () => {
+  const { pod, kv, rows, ctx, prepare, log, said } = await keptForum();
+  const N = 'https://mei.pod.example/fedipod/ap/notes/moved-1';
+  remoteDocs[N] = note(N, { type: 'Article', name: 'Before the move', audience: HOME + 'c/gardening/ap/actor', published: '2026-09-28T13:00:00Z' });
+  const create = { '@context': 'https://www.w3.org/ns/activitystreams', id: N + '#create', type: 'Create', actor: MEI, object: remoteDocs[N], to: remoteDocs[N].to, cc: [] };
+  pod.deliver('moved-1', create);
+  assert.equal((await placeAtDoor(ctx, 'gardening', rows.gardening, { name: 'moved-1', raw: JSON.stringify(create), remote: pod, prepare, log })).placed, true);
+  // A second post, taken down by its author since.
+  const G = 'https://mei.pod.example/fedipod/ap/notes/moved-gone';
+  remoteDocs[G] = note(G, { inReplyTo: N, audience: HOME + 'c/gardening/ap/actor', published: '2026-09-28T13:05:00Z' });
+  const create2 = { '@context': 'https://www.w3.org/ns/activitystreams', id: G + '#create', type: 'Create', actor: MEI, object: remoteDocs[G], to: remoteDocs[G].to, cc: [] };
+  pod.deliver('moved-gone', create2);
+  assert.equal((await placeAtDoor(ctx, 'gardening', rows.gardening, { name: 'moved-gone', raw: JSON.stringify(create2), remote: pod, prepare, log })).placed, true);
+  remoteDocs[G] = { '@context': 'https://www.w3.org/ns/activitystreams', id: G, type: 'Tombstone', formerType: 'Note' };
+  // The new pod has the forum's older documents and not these posts' copies.
+  const copyAt = [...pod.docs.keys()].filter((u) => u.startsWith(HOME + 'c/gardening/ap/cache/'));
+  for (const u of copyAt) pod.docs.delete(u);
+  const out = await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+  assert.equal(out.skipped, undefined, `the run ran (${out.skipped || ''})`);
+  const back = [...pod.docs.entries()].find(([u, d]) => u.startsWith(HOME + 'c/gardening/ap/cache/') && d?.id === N);
+  assert.ok(back, 'the post\'s copy is read again from its author and written on the pod');
+  assert.ok(back[1].context, 'naming its topic');
+  const gone = [...pod.docs.entries()].filter(([u, d]) => u.startsWith(HOME + 'c/gardening/ap/cache/') && d?.type === 'Tombstone');
+  assert.equal(gone.length, 1, 'the post its author took down is copied as removed');
+  assert.ok(said.some((m) => /published whole at /u.test(m)), said.join(' | '));
+  assert.equal(JSON.parse((await kv.get('forum/d/home.json')).text).home, HOME, 'where it was published is recorded');
+  // Published there now: the next run does not do it again.
+  for (const u of [...pod.docs.keys()].filter((x) => x.startsWith(HOME + 'c/gardening/ap/cache/'))) pod.docs.delete(u);
+  said.length = 0;
+  await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+  assert.ok(!said.some((m) => /published whole/u.test(m)), 'a later run publishes nothing whole again');
+  assert.ok(![...pod.docs.keys()].some((u) => u.startsWith(HOME + 'c/gardening/ap/cache/')), 'and reads nothing again');
+});
+
 test('the run: carries what the door placed, writes the heartbeat, and says when it is next due', async () => {
   const { pod, kv, rows, ctx, purged, prepare, log } = await keptForum();
   const N = 'https://mei.pod.example/fedipod/ap/notes/door-2';
