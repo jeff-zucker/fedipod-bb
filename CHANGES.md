@@ -4,6 +4,13 @@ Changes up to and including 0.4.1 are recorded in FediPod's
 [CHANGES.md](https://github.com/jeff-zucker/FediPod/blob/main/CHANGES.md),
 under the headings that name fedipod-bb.
 
+## 2026-11-13 (a kept forum takes its mail in again — version 0.5.2)
+
+**A forum kept by a Gateway takes in everything sent to it again.** After a
+change to the forum's settings, posts, replies and follows sent to it were
+accepted and never appeared. They appear now, and what was waiting is taken
+in, fifty items a run.
+
 ## 2026-10-21 (the forum's own robots.txt — version 0.5.1)
 
 **The forum's host asks search engines to stay out**, with a `robots.txt`
