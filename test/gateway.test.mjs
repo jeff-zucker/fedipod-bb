@@ -19,12 +19,12 @@ const HOME = POD + 'fedipod-bb/';
 // A forum set up the ordinary way, then handed to the gateway: its state
 // copied from the pod into the gateway's copies, its rows kept, and the pod
 // answering the keys the copies leave there.
-async function keptForum() {
+async function keptForum({ categories = ['gardening'] } = {}) {
   const pod = fakePod();
   const dir = home();
   const setup = new ForumAgent({ home: dir, log: () => {}, remote: pod, storageFor: pod.storageFor, pollSeconds: 3600 });
   setup.probeFetch = async () => ({ status: 200 });
-  await setup.init({ handle: 'forum', name: 'The Forum', categories: ['gardening'], replyPolicy: 'open' });
+  await setup.init({ handle: 'forum', name: 'The Forum', categories, replyPolicy: 'open' });
   assert.ok(await setup.connect());
   const g = setup.categories[0];
   g.store.setContacts({ followers: [
@@ -35,7 +35,7 @@ async function keptForum() {
   fs.rmSync(dir, { recursive: true, force: true });
   // The copies, as the gateway would have filled them from the pod.
   const kv = memoryKv();
-  const bases = { forum: HOME + 'ap-state/', gardening: HOME + 'c/gardening/ap-state/' };
+  const bases = { forum: HOME + 'ap-state/', ...Object.fromEntries(categories.map((c) => [c, HOME + `c/${c}/ap-state/`])) };
   for (const [h, base] of Object.entries(bases)) {
     const m = pod.state.get(base) || new Map();
     for (const [name, body] of m) if (name !== 'keys.json' && name !== 'lease.json') await kv.set(`${h}/d/${name}`, body);
@@ -55,7 +55,8 @@ async function keptForum() {
   };
   const rows = {
     forum: { handle: 'forum', kind: 'application', podHome: HOME, inboxUrl: HOME + 'ap/inbox/', webId: WEBID, keeper: { webId: KEEPER } },
-    gardening: { handle: 'gardening', kind: 'group', podHome: HOME + 'c/gardening/', inboxUrl: HOME + 'ap/inbox/', webId: WEBID, keeper: { webId: KEEPER }, forum: 'forum' },
+    ...Object.fromEntries(categories.map((c) => [c,
+      { handle: c, kind: 'group', podHome: HOME + `c/${c}/`, inboxUrl: HOME + 'ap/inbox/', webId: WEBID, keeper: { webId: KEEPER }, forum: 'forum' }])),
   };
   const started = [];
   const said = [];
@@ -163,4 +164,69 @@ test('the run: carries what the door placed, writes the heartbeat, and says when
   assert.ok(await copyMeta(kv, 'forum') && await copyMeta(kv, 'gardening'), 'the copies are still the gateway\'s');
   assert.ok(purged.includes('u-forum') && purged.includes('u-gardening'),
     `the run clears the edge's copies of the forum and its categories (${purged.join(',') || 'none'})`);
+});
+
+// A forum whose settings changed after its categories' were last written, so
+// connecting writes the first category's again. The second category's state
+// is slow to list, as a real store is, which gives that write time to be sent
+// before the connect is over.
+async function forumWithChangedSettings() {
+  const kept = await keptForum({ categories: ['gardening', 'tools'] });
+  const { kv } = kept;
+  const cfg = JSON.parse((await kv.get('forum/d/config.json')).text);
+  cfg.categories = cfg.categories.map((c) => (c.slug === 'gardening' ? { ...c, summary: 'Beds, borders and pots' } : c));
+  await kv.set('forum/d/config.json', JSON.stringify(cfg));
+  const list = kv.list.bind(kv);
+  kv.list = async (prefix) => { if (prefix === 'tools/d/') await new Promise((r) => setTimeout(r, 450)); return list(prefix); };
+  return kept;
+}
+const postTo = (name, title) => {
+  const N = `https://mei.pod.example/fedipod/ap/notes/${name}`;
+  remoteDocs[N] = note(N, { type: 'Article', name: title, audience: HOME + 'c/gardening/ap/actor', published: '2026-09-28T14:00:00Z' });
+  return { N, create: { '@context': 'https://www.w3.org/ns/activitystreams', id: N + '#create', type: 'Create', actor: MEI, object: remoteDocs[N], to: remoteDocs[N].to, cc: [] } };
+};
+
+test('a category whose settings changed: the run writes them and still takes the inbox in', async () => {
+  const { pod, kv, rows, ctx, prepare, log, said } = await forumWithChangedSettings();
+  const { N, create } = postTo('settings-1', 'After the settings changed');
+  pod.deliver('settings-1', create);
+  const out = await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+  assert.equal(out.skipped, undefined, `the run ran (${out.skipped || ''})`);
+  const refused = said.filter((m) => /state write .* refused|state not written/u.test(m));
+  assert.deepEqual(refused, [], 'no state write is refused, and nothing is left for want of one');
+  assert.equal(JSON.parse((await kv.get('gardening/d/config.json')).text).summary, 'Beds, borders and pots', 'the category\'s settings are written');
+  assert.equal(pod.inbox.length, 0, 'the item left the inbox');
+  const topicsDoc = JSON.parse((await kv.get('gardening/d/topics.json')).text);
+  const topic = JSON.parse((await kv.get(`gardening/d/${topics.topicDoc(topicsDoc[0].tid)}`)).text);
+  assert.ok(topic.posts.some((p) => p.id === N), 'and its post is in its topic');
+});
+
+test('a category whose settings changed: the door still places a post', async () => {
+  const { pod, kv, rows, ctx, prepare, log, said } = await forumWithChangedSettings();
+  const { create } = postTo('settings-2', 'Through the door, after the settings changed');
+  pod.deliver('settings-2', create);
+  const r = await placeAtDoor(ctx, 'gardening', rows.gardening, { name: 'settings-2', raw: JSON.stringify(create), remote: pod, prepare, log });
+  assert.equal(r.placed, true, `placed (${r.why || 'ok'}; ${said.filter((m) => /refused|not written/u.test(m)).join(' | ')})`);
+  assert.equal(pod.inbox.length, 0, 'the item left the inbox');
+  assert.equal(JSON.parse((await kv.get('gardening/d/topics.json')).text).length, 1, 'the topic is in the category\'s copy');
+});
+
+// The live forum had 3,561 items waiting, nearly all of them notices from
+// strangers that an account was deleted. A run takes fifty in; this is three
+// runs' worth.
+test('a pile of notices from strangers: each run takes fifty in, and the pile goes', async () => {
+  const { pod, rows, ctx, prepare, log, said } = await forumWithChangedSettings();
+  for (let i = 0; i < 120; i++) {
+    const actor = `https://mastodon.example/users/gone${i}`;
+    pod.deliver(`gone-${String(i).padStart(3, '0')}`, { '@context': 'https://www.w3.org/ns/activitystreams', id: actor + '#delete',
+      type: 'Delete', actor, to: ['https://www.w3.org/ns/activitystreams#Public'], object: actor });
+  }
+  const left = [];
+  for (let run = 0; run < 3; run++) {
+    const out = await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+    assert.equal(out.skipped, undefined, `run ${run + 1} ran (${out.skipped || ''})`);
+    left.push(pod.inbox.length);
+  }
+  assert.deepEqual(left, [70, 20, 0], 'fifty leave the inbox on each run');
+  assert.deepEqual(said.filter((m) => /state write .* refused|state not written/u.test(m)), [], 'and no state write is refused on the way');
 });

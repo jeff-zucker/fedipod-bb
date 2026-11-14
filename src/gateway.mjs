@@ -194,10 +194,14 @@ export async function keepOnce(ctx, handle, rec, { log = console.log, session = 
   let asks = 0;
   try {
     forum = agentFor(ctx, f, { remote, podFetch, copies, log: say, mode: 'run' });
-    if (!await forum.connect({ act: false })) return { skipped: 'no forum on the pod' };
-    prepare?.(forum);   // a test's origins, in place of the network
-    if (!await forum.lease.acquire()) return { skipped: 'another host has the forum', retry: 'soon' };
+    // The lease before the connect: connecting writes a category's settings
+    // again where the forum's changed, and a copy takes a write only from
+    // the lease's holder.
+    const lease = forum.givenLease;
+    if (!await lease.acquire()) return { skipped: 'another host has the forum', retry: 'soon' };
     try {
+      if (!await forum.connect({ act: false })) return { skipped: 'no forum on the pod' };
+      prepare?.(forum);   // a test's origins, in place of the network
       // A forum on a pod it has not published to — moved there, its rows
       // naming the new pod — is published there whole, and what that pod
       // lacks is read again from where its authors keep it. Recorded once
@@ -222,7 +226,7 @@ export async function keepOnce(ctx, handle, rec, { log = console.log, session = 
       await Promise.allSettled(storesOf(forum).map((s) => s.flush()));
       asks = storesOf(forum).reduce((n, s) => n + s.read('modqueue.json', []).length, 0);
       before = new Map(storesOf(forum).map((s) => [s, s.getQueue?.() || []]));
-    } finally { await forum.lease.release().catch(() => {}); }
+    } finally { await lease.release().catch(() => {}); }
   } finally { await unlock(); }
 
   // The carry, with the forum free.
@@ -278,15 +282,17 @@ export async function placeAtDoor(ctx, handle, rec, { name, raw, receipt = null,
   if (!unlock) return { ...out, why: 'the forum is busy' };
   try {
     const forum = agentFor(ctx, f, { remote, podFetch, copies, log: say, mode: 'door' });
-    if (!await forum.connect({ act: false })) return { ...out, why: 'no forum on the pod' };
-    prepare?.(forum);   // a test's origins, in place of the network
-    if (!await forum.lease.acquire()) return { ...out, why: 'another host has the forum' };
+    // The lease before the connect, as in the run.
+    const lease = forum.givenLease;
+    if (!await lease.acquire()) return { ...out, why: 'another host has the forum' };
     try {
+      if (!await forum.connect({ act: false })) return { ...out, why: 'no forum on the pod' };
+      prepare?.(forum);   // a test's origins, in place of the network
       if (!await forum.placeOne(name, raw, receipt)) return { ...out, why: 'not done here; left for the run' };
       const item = f.home + 'ap/inbox/' + name;
       await podInbox.dropHandledItem(remote, item).catch(() => false);
       await podInbox.dropReceiptBeside(remote, item);
       return { ...out, placed: true };
-    } finally { await forum.lease.release().catch(() => {}); }
+    } finally { await lease.release().catch(() => {}); }
   } finally { await unlock(); }
 }
