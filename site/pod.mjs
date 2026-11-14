@@ -98,6 +98,16 @@ export async function podInboxOf(categoryActorId, { fetch: f = globalThis.fetch.
 export const session = getSession;
 export const signOut = endSession;
 
+// Whether a stored sign-in still holds. A session read from the browser says
+// only that one is stored: the pod is asked, and only when the sign-in's time
+// is up. False when the pod has ended it. True where the pod cannot be asked
+// just now, so a pod that is down does not sign the reader out of the page.
+export async function stillSignedIn(s) {
+  if (!s) return false;
+  if (typeof s.check !== 'function') return true;
+  try { return await s.check(); } catch { return true; }
+}
+
 // Send them to their pod to sign in. `issuer` came from the Gateway, which
 // knows the pod behind their handle.
 export async function signIn({ issuer, redirectUri }) {

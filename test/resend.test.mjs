@@ -48,3 +48,14 @@ test('sending again hands the forum the same post, read back from the pod, in th
   await assert.rejects(resend({ actor, podHome, id: POST, inbox: 'https://x.example/', fetch,
     session: { fetch: async () => new Response('', { status: 404 }) } }), /could not give the post back \(HTTP 404\)/u);
 });
+
+// A stored sign-in is asked about before the page says "signed in".
+test('a stored sign-in: good when the pod says so, over when the pod has ended it, kept when the pod cannot be asked', async () => {
+  const { stillSignedIn } = await import('../site/pod.mjs');
+  assert.equal(await stillSignedIn(null), false, 'nothing stored is nobody signed in');
+  assert.equal(await stillSignedIn({ check: async () => true }), true);
+  assert.equal(await stillSignedIn({ check: async () => false }), false, 'the pod ended it');
+  assert.equal(await stillSignedIn({ check: async () => { throw new Error('pod.example could not renew your sign-in just now (HTTP 502)'); } }), true,
+    'a pod that is down does not sign the reader out of the page');
+  assert.equal(await stillSignedIn({ webId: 'https://pod.example/mei/profile/card#me' }), true, 'a session library that cannot say is believed, as before');
+});

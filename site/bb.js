@@ -68,6 +68,7 @@ const seen = base ? readState({ storage: localStorage, forum: base }) : null;
 
 let forum = null;
 let podAcct = null;          // { handle, actor, webId } when signed in with a pod
+let lapsed = null;           // the pod account whose sign-in the pod has ended, for the way back in
 let moderators = [];         // the category's own list, read from the forum
 const account = () => podAcct || login.account();
 const cats = () => forum?.categories || [];
@@ -156,6 +157,62 @@ const drawnFor = (kind, slug = null, tid = null) => {
   if (podAcct && cats().some(c => c.private)) return null;
   return boot;
 };
+
+// A sign-in the pod has ended. The page was saying "signed in" on the strength
+// of what the browser had stored; it stops, keeps what the reader was writing,
+// and puts their handle where they sign in again. True when that is what `e`
+// (an action's failure) came from.
+const ENDED = 'Your sign-in has ended. Sign in again; what you wrote is kept.';
+function signedOutByPod(was) {
+  lapsed = was;
+  podAcct = null;
+  read = makeReader();
+  try { localStorage.removeItem('bb:acct'); } catch { /* blocked storage */ }
+  for (const id of ['signin-handle', 'fedi-handle']) { const el = $(id); if (el && !el.value) el.value = was?.handle || ''; }
+}
+async function signInEnded(e) {
+  if (!podAcct) return false;
+  let over = !!e?.signedOut;
+  if (!over) {
+    const s = await pod.session().catch(() => null);
+    over = !(await pod.stillSignedIn(s));
+  }
+  if (!over) return false;
+  signedOutByPod(podAcct);
+  if ($('reply-dlg').open && replyCtx) {
+    keepDraft();
+    const ctx = replyCtx;
+    const edit = editing;
+    replyBox(ctx);
+    editing = edit;
+    $('reply-err').textContent = ENDED;
+  } else {
+    askToSignIn('go on');
+    $('signin-note').textContent = 'Your sign-in has ended.';
+  }
+  paintWho();
+  return true;
+}
+// What an action that failed has to say, unless it failed because the sign-in ended.
+async function oops(e) { if (!(await signInEnded(e).catch(() => false))) alert(e.message); }
+
+// What the reader was writing, kept across the trip to their pod's login and
+// back: put aside with the address it was written at, and put back the next
+// time the box opens there.
+function keepDraft() {
+  const text = $('reply-text').value;
+  const title = $('topic-title').value;
+  if (!text.trim() && !title.trim()) return;
+  try { sessionStorage.setItem('bb:draft', JSON.stringify({ at: whereNow(), text, title })); } catch { /* blocked storage */ }
+}
+function bringDraft() {
+  let d = null;
+  try { d = JSON.parse(sessionStorage.getItem('bb:draft') || 'null'); } catch { /* unreadable */ }
+  if (!d || d.at !== whereNow() || !account()) return;
+  if (!$('reply-text').value) $('reply-text').value = d.text || '';
+  if (!$('topic-title').value) $('topic-title').value = d.title || '';
+  sessionStorage.removeItem('bb:draft');
+}
 
 // Who the page is holding, in the top row: the handle a reader posts under,
 // and the way in when there is nobody. Signing in from here is what makes the
@@ -775,6 +832,7 @@ function sayPrivacy() {
 function showDialog() {
   sayPrivacy();
   reopener = document.activeElement;
+  bringDraft();
   $('reply-dlg').showModal();
   (account() ? $('reply-text') : $('fedi-handle'))?.focus();
 }
@@ -849,7 +907,7 @@ async function resendPost(id, btn) {
     forgetIndex();
     freshRead = true;
     try { await route(); } finally { freshRead = false; }
-  } catch (e) { btn.disabled = false; alert(e.message); }
+  } catch (e) { btn.disabled = false; oops(e); }
 }
 
 async function report(id) {
@@ -861,7 +919,7 @@ async function report(id) {
     const who = podAcct?.actor || login.account()?.url;
     await pod.report({ actor: who, object: id, category: cat.id, inbox, why });
     alert('Reported. A moderator will see it in the forum\'s queue.');
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 async function asksTo(activity, forCat = null) {
@@ -890,7 +948,7 @@ async function asksTo(activity, forCat = null) {
 async function modRemove(id) {
   if (!confirm('Remove this post from the topic?')) return;
   const topicId = replyCtx.topicId || (replyCtx.cat.base + 'ap/topic/' + (await topicOf(id)));
-  try { await asksTo({ type: 'Delete', object: id, origin: topicId }); } catch (e) { alert(e.message); }
+  try { await asksTo({ type: 'Delete', object: id, origin: topicId }); } catch (e) { oops(e); }
 }
 
 // A topic's name belongs to the topic, and only the forum writes it.
@@ -898,7 +956,7 @@ async function modRename(topicId) {
   const now = document.querySelector('.topline h1')?.textContent || '';
   const name = window.prompt('Name for this topic', now);
   if (name === null || !name.trim()) return;
-  try { await asksTo({ type: 'Update', object: { id: topicId, name: name.trim() } }); } catch (e) { alert(e.message); }
+  try { await asksTo({ type: 'Update', object: { id: topicId, name: name.trim() } }); } catch (e) { oops(e); }
 }
 
 // Pinned topics are the category's featured collection.
@@ -925,7 +983,7 @@ async function joinOrLeave(categoryId, on) {
     if (on) own().join(cat.id); else own().leave(cat.id);
     forgetIndex();
     await showForum();
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 // --- signing in where the reader is, rather than where the form is ---
@@ -1079,7 +1137,7 @@ async function askToJoin(categoryId) {
     await pod.join({ actor: podAcct.actor, category: cat.id, inbox });
     say('Asked. A moderator sees it in the forum\'s queue.');
     alert('Your request is with the moderators.');
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 // Admitting somebody who asked: their follow is accepted, and in a private
@@ -1092,7 +1150,7 @@ async function modAdmit(who, slug) {
     await asksTo({ type: 'Join', object: who }, cat);
     await asksTo({ type: 'Add', object: who, target: cat.base + 'ap/members' }, cat);
     say('Admitted. It takes effect once the forum has checked who asked.');
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 // A bookmark is this reader's own note to come back to, in this browser.
@@ -1115,7 +1173,7 @@ async function modHeld(postId, slug, through) {
   try {
     await asksTo({ type: through ? 'Accept' : 'Reject', object: postId }, cat);
     say(through ? 'Let through. It is carried once the forum has checked who asked.' : 'Turned away.');
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 // A reported post taken out of its topic, from the queue rather than from
@@ -1130,7 +1188,7 @@ async function modRemoveFromQueue(postId, slug) {
     if (!copy?.topic) throw new Error('the forum does not say which topic holds it');
     await asksTo({ type: 'Delete', object: postId, origin: copy.topic }, cat);
     say('Asked. It takes effect once the forum has checked who asked.');
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 // Banning: the category blocks them, which is the whole of what a group can
@@ -1142,7 +1200,7 @@ async function modBan(who, slug) {
   try {
     await asksTo({ type: 'Block', object: who }, cat);
     say('Asked. It takes effect once the forum has checked who asked.');
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 // The line naming who moderates, from actor ids: each one's own handle where
@@ -1248,20 +1306,20 @@ async function modLock(topicId, on) {
   try {
     await asksTo({ type: 'Update',
       object: { id: topicId, type: 'OrderedCollection', closed: on ? new Date().toISOString() : null } });
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 
 async function modPin(topicId, on, wholeSite = false) {
   // Which featured collection it goes into says how far the pin reaches: the
   // category's, or the forum's own.
   const target = wholeSite ? base + 'ap/featured' : replyCtx.cat.base + 'ap/featured';
-  try { await asksTo({ type: on ? 'Add' : 'Remove', object: topicId, target }); } catch (e) { alert(e.message); }
+  try { await asksTo({ type: on ? 'Add' : 'Remove', object: topicId, target }); } catch (e) { oops(e); }
 }
 
 // A topic removed from the category is a topic gone (FEP-f15d).
 async function modDropTopic(topicId) {
   if (!confirm('Delete this topic and every post in it?')) return;
-  try { await asksTo({ type: 'Remove', object: topicId, target: replyCtx.cat.id }); } catch (e) { alert(e.message); }
+  try { await asksTo({ type: 'Remove', object: topicId, target: replyCtx.cat.id }); } catch (e) { oops(e); }
 }
 
 async function removePost(id) {
@@ -1278,7 +1336,7 @@ async function removePost(id) {
     }
     forgetIndex();
     await route();
-  } catch (e) { alert(e.message); }
+  } catch (e) { oops(e); }
 }
 $('reply-cancel').addEventListener('click', () => $('reply-dlg').close());
 // Open or private is the forum's setting, changed here and nowhere else:
@@ -1452,7 +1510,7 @@ $('reply-send').addEventListener('click', async () => {
     forgetIndex();
     freshRead = true;
     try { await route(); } finally { freshRead = false; }
-  } catch (e) { $('reply-err').textContent = e.message; }
+  } catch (e) { if (!(await signInEnded(e).catch(() => false))) $('reply-err').textContent = e.message; }
   $('reply-send').disabled = false;
 });
 
@@ -1476,8 +1534,11 @@ function goBack(query) {
   const kept = localStorage.getItem('bb:acct');
   if (kept && !sessionStorage.getItem('bb:pod')) {
     try {
+      // What the browser has stored says a sign-in was made, not that the pod
+      // still honours it: the pod is asked before the page says "signed in".
       const s = await pod.session();
-      if (s) { podAcct = { ...JSON.parse(kept), webId: s.webId }; read = makeReader(s); }
+      if (s && await pod.stillSignedIn(s)) { podAcct = { ...JSON.parse(kept), webId: s.webId }; read = makeReader(s); }
+      else if (s) signedOutByPod(JSON.parse(kept));
       else localStorage.removeItem('bb:acct');
     } catch { localStorage.removeItem('bb:acct'); }
   }
