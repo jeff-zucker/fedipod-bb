@@ -301,3 +301,19 @@ export async function applyForumModeration(forum, cat, entry) {
   }
   return applyModeration(cat, entry);
 }
+
+// A queued Delete whose asker wrote the post is the author's own deletion,
+// not a moderator's ask: carried out as one, under the same two guards (the
+// post is theirs, and it is gone where they keep it). True when it was
+// carried out and has left the queue.
+export async function authorsDelete(cat, entry) {
+  if (entry.type !== 'Delete') return false;
+  const noteId = idOf(entry.activity?.object);
+  const s = noteId && cat.store.getStatuses().find(x => x.noteId === noteId);
+  if (!s || s.actor !== entry.moderator) return false;
+  const refused = await cat.intake.onDelete({ type: 'Delete', actor: entry.moderator, object: noteId }, entry.moderator);
+  if (refused) return false;
+  cat.store.write('modqueue.json', cat.store.read('modqueue.json', []).filter(e => e.id !== entry.id));
+  cat.log?.(`deleted by its author: ${noteId}`);
+  return true;
+}

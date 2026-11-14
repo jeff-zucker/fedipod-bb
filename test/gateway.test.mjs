@@ -159,7 +159,7 @@ test('the run: carries what the door placed, writes the heartbeat, and says when
   // Kwame's server is nowhere to be found from a test, so the carry was tried
   // and waits for another try — which is what the run reports as its next time.
   assert.ok(queue.every((i) => i.attempts >= 1), 'every queued delivery was tried by the run');
-  assert.ok(out.nextAt > Date.now(), 'and the run says when to come back for the retry');
+  assert.ok(typeof out.nextAt === 'string' && Date.parse(out.nextAt) > Date.now(), `and the run says when to come back for the retry, as a time the keeper's bookkeeping reads (${out.nextAt})`);
   assert.ok(pod.docs.get(HOME + 'ap/heartbeat')?.at, 'the heartbeat says the forum was just hosted');
   assert.ok(await copyMeta(kv, 'forum') && await copyMeta(kv, 'gardening'), 'the copies are still the gateway\'s');
   assert.ok(purged.includes('u-forum') && purged.includes('u-gardening'),
@@ -214,19 +214,71 @@ test('a category whose settings changed: the door still places a post', async ()
 // The live forum had 3,561 items waiting, nearly all of them notices from
 // strangers that an account was deleted. A run takes fifty in; this is three
 // runs' worth.
-test('a pile of notices from strangers: each run takes fifty in, and the pile goes', async () => {
+test('what waits for a moderator brings back no run; a moderator\'s own request does, for the first hour after it arrived', async () => {
+  const { pod, kv, rows, ctx, prepare, log, said } = await keptForum();
+  const cfg = JSON.parse((await kv.get('forum/d/config.json')).text);
+  await kv.set('forum/d/config.json', JSON.stringify({ ...cfg, moderators: [MEI] }));
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  // A first run tells the members the forum's settings changed. Their servers
+  // are nowhere to be found from a test, so those deliveries wait for another
+  // try; they are taken off the queue, so only the asks are left to speak.
+  await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+  const run = async (queue) => {
+    for (const h of ['forum', 'gardening']) await kv.set(`${h}/d/queue.json`, '[]');
+    await kv.set('gardening/d/modqueue.json', JSON.stringify(queue));
+    said.length = 0;
+    const out = await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+    assert.equal(out.skipped, undefined, `the run ran (${out.skipped || ''})`);
+    return { out, ended: Date.now() };
+  };
+  // A stranger's post held for review, and a report: a person decides these.
+  const held = { key: 'held', id: 'a-0', type: 'Create', moderator: KWAME, verified: false, at: ago(5 * 60_000),
+    activity: { id: 'https://kwame.example/users/kwame/statuses/1/activity', type: 'Create', actor: KWAME, object: 'https://kwame.example/users/kwame/statuses/1' } };
+  const report = { key: 'report', id: 'b-1', type: 'Flag', moderator: KWAME, verified: false, at: ago(60_000),
+    activity: { id: 'https://kwame.example/users/kwame#flags/1', type: 'Flag', actor: KWAME, object: 'https://mei.pod.example/fedipod/ap/notes/x' } };
+  const waiting = await run([held, report]);
+  assert.equal(waiting.out.nextAt, null, `two entries wait for a moderator, and the run asks to come back for neither (${waiting.out.nextAt})`);
+  assert.ok(said.some((m) => /done: .* 2 ask\(s\) pending/u.test(m)), `the run still says how many wait (${said.filter((m) => /done:/u.test(m)).join(' | ')})`);
+  // A moderator's own request, which her server does not answer for just now.
+  const ask = (at) => ({ key: 'ask', id: 'c-2', type: 'Delete', moderator: MEI, verified: false, at,
+    activity: { id: 'https://mei.pod.example/fedipod/ap/asks/1', type: 'Delete', actor: MEI, object: 'https://kwame.example/users/kwame/statuses/1' } });
+  const fresh = await run([ask(ago(10 * 60_000)), held]);
+  assert.ok(typeof fresh.out.nextAt === 'string' && Date.parse(fresh.out.nextAt) > fresh.ended && Date.parse(fresh.out.nextAt) <= fresh.ended + 61_000,
+    `a moderator's request ten minutes old is tried again: the run comes back within a minute (${fresh.out.nextAt})`);
+  const stale = await run([ask(ago(61 * 60_000)), held]);
+  assert.equal(stale.out.nextAt, null, `the same request after its first hour brings back no run (${stale.out.nextAt})`);
+  // Somebody claiming to be the moderator from another server is not her.
+  const claimed = { ...ask(ago(60_000)), activity: { id: 'https://elsewhere.example/asks/1', type: 'Delete', actor: MEI } };
+  const other = await run([claimed]);
+  assert.equal(other.out.nextAt, null, 'a request that does not come from the moderator\'s own server is one for a person to look at');
+});
+
+test('a pile of notices from strangers: each run takes fifty in, and the pile goes', async (t) => {
   const { pod, rows, ctx, prepare, log, said } = await forumWithChangedSettings();
   for (let i = 0; i < 120; i++) {
     const actor = `https://mastodon.example/users/gone${i}`;
     pod.deliver(`gone-${String(i).padStart(3, '0')}`, { '@context': 'https://www.w3.org/ns/activitystreams', id: actor + '#delete',
       type: 'Delete', actor, to: ['https://www.w3.org/ns/activitystreams#Public'], object: actor });
   }
-  const left = [];
+  const left = []; const next = []; const ended = [];
+  let intake = null;
+  const watched = (forum) => { prepare(forum); intake = forum.intake; };
   for (let run = 0; run < 3; run++) {
-    const out = await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare, log });
+    const out = await keepOnce(ctx, 'forum', rows.forum, { remote: pod, prepare: watched, log });
     assert.equal(out.skipped, undefined, `run ${run + 1} ran (${out.skipped || ''})`);
-    left.push(pod.inbox.length);
+    left.push(pod.inbox.length); next.push(out.nextAt); ended.push(Date.now());
   }
   assert.deepEqual(left, [70, 20, 0], 'fifty leave the inbox on each run');
+  // A run that left mail is due again at once; the one that emptied the inbox
+  // is not. The drain says whether it left mail from fedipod 1.57.3 on; with an
+  // older one the run cannot tell, and comes back only for what else is due.
+  if (typeof intake.moreWaiting === 'boolean') {
+    for (const run of [0, 1]) {
+      assert.ok(typeof next[run] === 'string' && Date.parse(next[run]) <= ended[run], `run ${run + 1} left mail and is due again at once (${next[run]})`);
+    }
+  } else {
+    t.diagnostic('this fedipod does not say whether a sweep left mail: a run that leaves mail is not due again by that alone');
+  }
+  assert.ok(next[2] === null || Date.parse(next[2]) > ended[2], `the run that emptied the inbox is not due at once (${next[2]})`);
   assert.deepEqual(said.filter((m) => /state write .* refused|state not written/u.test(m)), [], 'and no state write is refused on the way');
 });

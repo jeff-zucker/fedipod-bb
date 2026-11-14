@@ -442,17 +442,38 @@ export class ForumAgent {
     await cat.store.flush().catch(() => {});
   }
 
+  // An ask the forum tries by itself: from a listed moderator, naming an
+  // activity at that moderator's own origin. Everything else in a queue (a
+  // post held for review, a report, a stranger's word) waits for a person.
+  triesAsk(intake, entry) {
+    if (!(this.config.moderators || []).includes(entry?.moderator)) return false;
+    const id = entry.activity?.id;
+    return typeof id === 'string' && intake.sameIdentity(id, entry.moderator);
+  }
+
+  // How many asks still queued the forum would try again by itself, counting
+  // only those that arrived within `withinMs`: what a host comes back for.
+  asksToRetry(withinMs, now = Date.now()) {
+    let n = 0;
+    for (const [store, intake] of [[this.store, this.intake], ...this.categories.map(c => [c.store, c.intake])]) {
+      for (const entry of store.read('modqueue.json', [])) {
+        if (this.triesAsk(intake, entry) && now - Date.parse(entry.at) < withinMs) n++;
+      }
+    }
+    return n;
+  }
+
   // Queued asks from listed moderators that can be verified at their own
-  // origin are applied; everything else waits for a person.
+  // origin are applied; everything else waits for a person. A deletion by
+  // the post's own author is carried out as one (moderation.mjs).
   async applyVerifiedAsks() {
     await this.applySettingsAsks().catch(e => this.log(`settings: ${e.message}`));
     for (const cat of this.categories) {
       const q = cat.store.read('modqueue.json', []);
       for (const entry of [...q]) {
-        if (!(this.config.moderators || []).includes(entry.moderator)) continue;
-        const id = entry.activity?.id;
-        if (typeof id !== 'string') continue;
-        if (!cat.intake.sameIdentity(id, entry.moderator)) continue;
+        if (await moderation.authorsDelete(cat, entry).catch(e => { this.log(`ask ${entry.id}: ${e.message}`); return false; })) continue;
+        if (!this.triesAsk(cat.intake, entry)) continue;
+        const id = entry.activity.id;
         const doc = await cat.intake.fetchAP(id).catch(() => null);
         if (!doc || doc.type !== entry.type) continue;
         if (idOf(doc.actor) !== entry.moderator) continue;
@@ -556,9 +577,8 @@ export class ForumAgent {
   async applySettingsAsks() {
     const q = this.store.read('modqueue.json', []);
     for (const entry of [...q]) {
-      if (!(this.config.moderators || []).includes(entry.moderator)) continue;
-      const id = entry.activity?.id;
-      if (typeof id !== 'string' || !this.intake.sameIdentity(id, entry.moderator)) continue;
+      if (!this.triesAsk(this.intake, entry)) continue;
+      const id = entry.activity.id;
       const doc = await this.intake.fetchAP(id).catch(() => null);
       if (!doc || doc.type !== entry.type || idOf(doc.actor) !== entry.moderator) continue;
       try {

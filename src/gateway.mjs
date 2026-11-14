@@ -20,8 +20,11 @@ import * as publish from './publish.mjs';
 // The forum's page at its own host, drawn for the gateway to send.
 export { renderPage } from './render.mjs';
 
-// How soon a run comes back for an ask that could not be applied yet.
+// How soon a run comes back for an ask that could not be applied yet, and for
+// how long after the ask arrived. Only an ask the forum tries by itself counts
+// (forum-agent.mjs: triesAsk): what waits for a moderator brings back no run.
 const ASK_RETRY_MS = 60_000;
+const ASK_RETRY_FOR_MS = 3_600_000;
 
 /** A forum's own row, or one of its categories': both write into one inbox. */
 export const isForumRow = (rec) => !!rec?.inboxUrl && (rec.kind === 'group' || rec.kind === 'application');
@@ -128,14 +131,15 @@ function agentFor(ctx, f, { remote, podFetch, copies, log, mode }) {
 }
 
 // When the run should come back on its own: a delivery's next try, or an ask
-// that could not be applied yet.
-function nextRun(forum, asksPending) {
+// it will try again. A time the keeper's bookkeeping reads (an ISO string), or
+// null.
+function nextRun(forum, asksToRetry) {
   const times = [];
   for (const s of [forum.store, ...forum.categories.map((c) => c.store)]) {
-    for (const item of s.getQueue?.() || []) if (item.nextAt) times.push(item.nextAt);
+    for (const item of s.getQueue?.() || []) if (Number.isFinite(Number(item.nextAt))) times.push(Number(item.nextAt));
   }
-  if (asksPending) times.push(Date.now() + ASK_RETRY_MS);
-  return times.length ? Math.min(...times) : null;
+  if (asksToRetry) times.push(Date.now() + ASK_RETRY_MS);
+  return times.length ? new Date(Math.min(...times)).toISOString() : null;
 }
 
 /**
@@ -192,6 +196,8 @@ export async function keepOnce(ctx, handle, rec, { log = console.log, session = 
   let forum;
   let before;
   let asks = 0;
+  let retry = 0;      // asks the forum will try again by itself
+  let more = false;   // the run took mail in and left more in the inbox
   try {
     forum = agentFor(ctx, f, { remote, podFetch, copies, log: say, mode: 'run' });
     // The lease before the connect: connecting writes a category's settings
@@ -220,11 +226,13 @@ export async function keepOnce(ctx, handle, rec, { log = console.log, session = 
         }
       }
       await forum.intake.drain();
+      more = forum.intake.moreWaiting === true;
       await forum.applyVerifiedAsks().catch((e) => say(`asks: ${e.message}`));
       await forum.publishModQueue().catch((e) => say(`queue: ${e.message}`));
       await publish.publishHeartbeat(forum.siteAgent).catch((e) => say(`heartbeat: ${e.message}`));
       await Promise.allSettled(storesOf(forum).map((s) => s.flush()));
       asks = storesOf(forum).reduce((n, s) => n + s.read('modqueue.json', []).length, 0);
+      retry = forum.asksToRetry(ASK_RETRY_FOR_MS);
       before = new Map(storesOf(forum).map((s) => [s, s.getQueue?.() || []]));
     } finally { await lease.release().catch(() => {}); }
   } finally { await unlock(); }
@@ -257,7 +265,9 @@ export async function keepOnce(ctx, handle, rec, { log = console.log, session = 
     await ctx.purge(tags).catch((e) => say(`purge: ${e.message}`));
   }
   say(`done: inbox drained, ${waiting} delivery(ies) waiting, ${asks} ask(s) pending`);
-  return { drained: true, waiting, nextAt: nextRun(forum, asks) };
+  // A run takes in so much and stops: with mail left, it is due again at once,
+  // for whoever starts runs that are due.
+  return { drained: true, waiting, nextAt: more ? new Date().toISOString() : nextRun(forum, retry) };
 }
 
 /**

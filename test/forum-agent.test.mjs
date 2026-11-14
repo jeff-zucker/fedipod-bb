@@ -156,6 +156,66 @@ test('a forum hosts its categories as groups and drains one inbox to all of them
   await agent.stop();
 });
 
+test('a moderator who deletes their own post: it leaves its topic, when it arrives or out of the queue', async (t) => {
+  const pod = fakePod();
+  const { agent } = await boot(pod, home());
+  await agent.init({ handle: 'forum', name: 'The Forum', categories: ['gardening'], moderators: [MEI] });
+  assert.ok(await agent.connect());
+  const g = agent.categories[0];
+  const delivered = [];
+  wire(agent, delivered);
+  // What each post's own server says of it: gone, still there, or no answer.
+  const origin = new Map();
+  g.intake.isGone = async (u) => origin.get(u) ?? false;
+
+  pod.deliver('f1', { id: MEI + '#follow-1', type: 'Follow', actor: MEI, object: g.urls.actor });
+  pod.deliver('f2', { id: KWAME + '#follow-1', type: 'Follow', actor: KWAME, object: g.urls.actor });
+  const post = (n, by = MEI, more = {}) => {
+    const id = `${by === MEI ? 'https://mei.pod.example/fedipod/ap/notes/' : 'https://kwame.example/notes/'}own-${n}`;
+    remoteDocs[id] = note(id, { by, audience: g.urls.actor, published: `2026-09-16T1${n}:00:00Z`, ...more });
+    pod.deliver(`c${n}`, { type: 'Create', actor: by, object: remoteDocs[id], to: remoteDocs[id].to, cc: [] });
+    return id;
+  };
+  const OPEN = post(0, MEI, { type: 'Article', name: 'Leaf mould' });
+  const R1 = post(1, MEI, { inReplyTo: OPEN });
+  const R2 = post(2, MEI, { inReplyTo: OPEN });
+  const R3 = post(3, KWAME, { inReplyTo: OPEN });
+  await agent.intake.drain();
+  const tid = topics.list(g.store)[0].tid;
+  const inTopic = () => topics.get(g.store, tid).posts.map(p => p.id);
+  assert.deepEqual(inTopic(), [OPEN, R1, R2, R3]);
+
+  // Waiting in the queue, as an ask: the address it names is the deleted post.
+  const queued = (id, noteId, by = MEI) => ({ key: `Delete ${by} ${noteId}`, id, type: 'Delete', moderator: by, verified: false,
+    at: new Date().toISOString(), activity: { id: `${noteId}#delete-1`, type: 'Delete', actor: by, object: noteId } });
+  g.store.write('modqueue.json', [queued('q-1', R1), queued('q-2', R3)]);
+  await agent.applyVerifiedAsks();
+  assert.deepEqual(inTopic(), [OPEN, R1, R2, R3], 'a post still published where its author keeps it stays');
+  assert.equal(g.store.read('modqueue.json', []).length, 2, 'and the ask stays');
+  origin.set(R1, null);
+  await agent.applyVerifiedAsks();
+  assert.deepEqual(inTopic(), [OPEN, R1, R2, R3], 'a server that gives no answer deletes nothing');
+  origin.set(R1, true); origin.set(R3, true);
+  await agent.applyVerifiedAsks();
+  assert.deepEqual(inTopic(), [OPEN, R2, R3], 'gone where its author keeps it, the post leaves its topic');
+  assert.deepEqual(pod.docs.get(g.urls.topicPage(tid, 1)).orderedItems, [OPEN, R2, R3], 'and the published topic says so');
+  assert.deepEqual(g.store.read('modqueue.json', []).map(e => e.id), ['q-2'], 'her own deletion leaves the queue; her ask about his post waits');
+
+  // Arriving: an older FediPod queues it for the next run, this one acts at once.
+  origin.set(R2, true);
+  pod.deliver('d1', { id: `${R2}#delete-2`, type: 'Delete', actor: MEI, object: R2, to: [PUBLIC, g.urls.actor] });
+  await agent.intake.drain();
+  if (g.intake.isModerationAsk({ type: 'Delete', actor: MEI, object: R3 }) && !g.store.read('modqueue.json', []).some(e => e.key.endsWith(R2))) {
+    assert.deepEqual(inTopic(), [OPEN, R3], 'her own deletion is carried out as it arrives');
+  } else {
+    t.diagnostic('this fedipod queues a moderator\'s deletion of their own post; the run carries it out');
+    await agent.applyVerifiedAsks();
+    assert.deepEqual(inTopic(), [OPEN, R3], 'her own deletion is carried out by the run');
+  }
+  assert.deepEqual(g.store.read('modqueue.json', []).map(e => e.id), ['q-2']);
+  await agent.stop();
+});
+
 test('posting into an open category joins it; a private one still waits for a moderator', async () => {
   const pod = fakePod();
   const { agent, log } = await boot(pod, home());
