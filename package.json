@@ -34,7 +34,7 @@
   },
   "dependencies": {
     "fedipod": "^1.50.2",
-    "fediverse-session": "^0.2.1",
+    "fediverse-session": "^0.2.2",
     "htmlparser2": "^12.0.0"
   }
 }
